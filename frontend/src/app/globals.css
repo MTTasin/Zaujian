@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Premium-editorial light theme. Plum + rose + gold on warm cream. */
+:root {
+  --background: #faf6ee;   /* warm ivory paper */
+  --surface: #fffdf9;      /* soft white */
+  --surface-2: #f2eadd;    /* warm sand panel */
+  --foreground: #2a2028;   /* deep ink */
+  --muted: #8a7d84;
+  --plum: #5b2a4e;         /* deep primary */
+  --wine: #38182f;         /* dramatic dark band */
+  --rose: #c25e8b;         /* soft accent (used sparingly) */
+  --gold: #a9822f;         /* antique gold */
+  --gold-soft: #d9b877;    /* light gold for glows/tints */
+  --border: #e7dccc;       /* warm hairline */
+  --success: #2e7d5b;
+  --warn: #b4791f;
+  --error: #b3261e;
+  /* Transitional aliases: old brand-* names still used by not-yet-rebuilt
+     pages. Mapped to the new palette so those screens stay coherent until
+     their phase re-skins them. Remove once no file references brand-*. */
+  --brand-pink: var(--rose);
+  --brand-magenta: var(--rose);
+  --brand-purple: var(--plum);
+  --brand-deep: var(--plum);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-plum: var(--plum);
+  --color-wine: var(--wine);
+  --color-rose: var(--rose);
+  --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
+  --color-border: var(--border);
+  --color-success: var(--success);
+  --color-warn: var(--warn);
+  --color-error: var(--error);
+  /* Transitional aliases (see :root note above). */
+  --color-brand-pink: var(--brand-pink);
+  --color-brand-magenta: var(--brand-magenta);
+  --color-brand-purple: var(--brand-purple);
+  --color-brand-deep: var(--brand-deep);
+  --font-sans: var(--font-bengali);
+  --font-display: var(--font-display);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-bengali), system-ui, sans-serif;
+  /* Slightly larger base — helps the low-literacy audience and reads premium. */
+  font-size: 17px;
+  line-height: 1.6;
+}
+
+/* Elegant display headings. */
+.font-display {
+  letter-spacing: -0.01em;
+}
+
+/* Balanced headline wrapping for editorial feel. */
+.text-balance {
+  text-wrap: balance;
+}
+
+/* Thin gold rule used as an editorial divider. */
+.gold-rule {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+}
+
+/* Gentle float for the chat greeting bubble (draws the eye without shouting). */
+@keyframes chatFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.chat-nudge {
+  animation: chatFloat 2.8s ease-in-out infinite;
+}
+
+/* Print — Steadfast challan sticker. Force backgrounds/watermark to print. */
+@media print {
+  @page { margin: 6mm; }
+  .challan-sheet {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+
+/* "Come to me" customize CTA — breathing scale + pulsing gold halo draws the eye. */
+@keyframes ctaBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+@keyframes ctaHalo {
+  0% { box-shadow: 0 10px 30px -8px rgba(56, 24, 47, .5), 0 0 0 0 rgba(217, 184, 119, .7); }
+  70% { box-shadow: 0 10px 30px -8px rgba(56, 24, 47, .5), 0 0 0 16px rgba(217, 184, 119, 0); }
+  100% { box-shadow: 0 10px 30px -8px rgba(56, 24, 47, .5), 0 0 0 0 rgba(217, 184, 119, 0); }
+}
+.cta-attention {
+  animation: ctaBreathe 2.4s ease-in-out infinite, ctaHalo 2.4s ease-out infinite;
+}
+
+/* Signature gradient, now demoted to an accent (rose -> plum). */
+.brand-gradient {
+  background-image: linear-gradient(120deg, var(--rose), var(--plum));
+}
+.brand-gradient-text {
+  background-image: linear-gradient(120deg, var(--rose), var(--plum));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

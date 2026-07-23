@@ -1,0 +1,58 @@
+{
+  "Mymensingh": {
+    "Jamalpur": [
+      "Bakshiganj",
+      "Baksiganj",
+      "Dewanganj",
+      "Islampur",
+      "Jamalpur Sadar",
+      "Madarganj",
+      "Melandaha",
+      "Sarishabari",
+      "Others"
+    ],
+    "Mymensingh": [
+      "Bhaluka",
+      "Bhalukha",
+      "Dhobaura",
+      "Fulbaria",
+      "Gaffargaon",
+      "Gauripur",
+      "Gouripur",
+      "Haluaghat",
+      "Ishwarganj",
+      "Kotwali",
+      "Muktagachha",
+      "Mymensingh Sadar",
+      "Nandail",
+      "Pagla",
+      "Phulpur",
+      "Tara Khanda",
+      "Tarakanda",
+      "Trisal",
+      "Trishal",
+      "Others"
+    ],
+    "Netrokona": [
+      "Atpara",
+      "Barhatta",
+      "Durgapur",
+      "Kalmakanda",
+      "Kendua",
+      "Khaliajuri",
+      "Madan",
+      "Mohanganj",
+      "Netrokona Sadar",
+      "Purbadhala",
+      "Others"
+    ],
+    "Sherpur": [
+      "Jhenaigati",
+      "Nakla",
+      "Nalitabari",
+      "Sherpur Sadar",
+      "Sreebardi",
+      "Others"
+    ]
+  }
+}

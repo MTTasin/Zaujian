@@ -1,0 +1,27 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>Confirm order #{{ order.pk }}</h1>
+
+<ul>
+  <li><strong>Customer:</strong> {{ order.customer_name }} ({{ order.phone }})</li>
+  <li><strong>Address:</strong> {{ order.address }}</li>
+  <li><strong>Subtotal:</strong> {{ order.subtotal }}</li>
+  <li><strong>Delivery charge:</strong> {{ order.delivery_charge }}</li>
+  <li><strong>Total:</strong> {{ order.total }}</li>
+  <li><strong>Advance required:</strong> {{ order.advance_required }}</li>
+  <li><strong>Payment verified:</strong> {{ order.payment_verified }}</li>
+</ul>
+
+<p>Enter the advance actually received. COD sent to Steadfast =
+   subtotal + delivery &minus; advance received. This books the consignment and
+   confirms the order.</p>
+
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <div class="submit-row">
+    <input type="submit" value="Book Steadfast &amp; confirm order" class="default">
+    <a href="{% url 'admin:app_order_change' order.pk %}" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

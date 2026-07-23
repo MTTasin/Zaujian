@@ -1,0 +1,105 @@
+{
+  "Rangpur": {
+    "Dinajpur": [
+      "Biral",
+      "Birampur",
+      "Birganj",
+      "Bochaganj",
+      "Chirirbandar",
+      "Dinajpur Sadar",
+      "Fulbari",
+      "Ghoraghat",
+      "Hakimpur",
+      "Kaharole",
+      "Khansama",
+      "Nawabganj",
+      "Parbatipur",
+      "Phulbari",
+      "Others"
+    ],
+    "Gaibandha": [
+      "Fulchhari",
+      "Gaibandha Sadar",
+      "Gobidaganj",
+      "Gobindaganj",
+      "Palashbari",
+      "Phulchhari",
+      "Sadullapur",
+      "Saghatta",
+      "Sughatta",
+      "Sundarganj",
+      "Others"
+    ],
+    "Kurigram": [
+      "Bhurungamari",
+      "Char Rajibpur",
+      "Chilmari",
+      "Dhushmara",
+      "Kachakata",
+      "Kurigram Sadar",
+      "Nageshwari",
+      "Phulbari",
+      "Rajarhat",
+      "Rajibpur",
+      "Raomari",
+      "Rowmari",
+      "Ulipur",
+      "Others"
+    ],
+    "Lalmonirhat": [
+      "Aditmari",
+      "Hatibanda",
+      "Hatibandha",
+      "Kaliganj",
+      "Lalmonirhat Sadar",
+      "Patgram",
+      "Others"
+    ],
+    "Nilphamari": [
+      "Dimla",
+      "Domar",
+      "Jaldhaka",
+      "Kishoreganj",
+      "Nilphamari Sadar",
+      "Saidpur",
+      "Others"
+    ],
+    "Panchagarh": [
+      "Atwari",
+      "Boda",
+      "Debiganj",
+      "Panchagarh Sadar",
+      "Tentulia",
+      "Tetulia",
+      "Others"
+    ],
+    "Rangpur": [
+      "Badarganj",
+      "Gangachara",
+      "Gangachhara",
+      "Haragach",
+      "Hazirhat",
+      "Kaunia",
+      "Kotwali",
+      "Mahiganj",
+      "Mitha Pukur",
+      "Mithapukur",
+      "Pirgachha",
+      "Pirganj",
+      "Rangpur Sadar",
+      "Tajhat",
+      "Taraganj",
+      "Others"
+    ],
+    "Thakurgaon": [
+      "Baliadangi",
+      "Bhulli",
+      "Haripur",
+      "Pirganj",
+      "Ranisankail",
+      "Ruhia",
+      "Thakurgaon Sadar",
+      "Others"
+    ]
+  }
+}

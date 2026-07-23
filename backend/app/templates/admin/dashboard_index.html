@@ -1,0 +1,28 @@
+{% extends "admin/index.html" %}
+{% comment %}
+Unique name (set via admin.site.index_template) so {% extends "admin/index.html" %}
+resolves to the real Django admin index without recursion. Adds a metrics panel
+above the standard app list. See plan §11 dashboard.
+{% endcomment %}
+
+{% block content %}
+<div class="module" style="margin-bottom:20px">
+  <h2>Dashboard</h2>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;padding:12px">
+    <div style="flex:1;min-width:160px;border:1px solid #ccc;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:28px;font-weight:700">{{ dash_orders_today }}</div>
+      <div>Orders today</div>
+    </div>
+    <div style="flex:1;min-width:160px;border:1px solid #ccc;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:28px;font-weight:700">{{ dash_pending_payment }}</div>
+      <div>Pending payment verification</div>
+    </div>
+    <div style="flex:1;min-width:160px;border:1px solid #ccc;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:28px;font-weight:700">{{ dash_pending_custom }}</div>
+      <div>Pending custom pricing</div>
+    </div>
+  </div>
+</div>
+
+{{ block.super }}
+{% endblock %}
