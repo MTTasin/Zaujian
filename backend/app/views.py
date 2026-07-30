@@ -360,6 +360,12 @@ def checkout(request):
     fraud = check_phone(phone)
     advance_required = bool(fraud.get("advance_required", True))
 
+    # Capture Meta attribution now, but DON'T fire Purchase — it fires when an
+    # admin confirms (see AdminOrderViewSet.confirm/set_status). fbp/fbc/ip/ua are
+    # stored on the order so the delayed, server-side event still matches well.
+    from .services.capi import _client
+    client_ip, user_agent = _client(request)
+
     with transaction.atomic():
         order = Order.objects.create(
             customer_name=request.data["customer_name"],
@@ -376,10 +382,14 @@ def checkout(request):
             advance_required=advance_required,
             advance_amount=advance_amount if advance_required else Decimal("0"),
             fraud_check_result=fraud,
-            # Good delivery record (no advance) -> straight to confirmed (plan §10).
-            # Otherwise wait for the manual advance payment.
-            status=(Order.Status.PENDING_PAYMENT if advance_required
-                    else Order.Status.CONFIRMED),
+            # Every website order waits for a human to phone-verify and confirm.
+            # advance_required is just a mark on the review; nothing auto-confirms.
+            status=Order.Status.IN_REVIEW,
+            meta_fbp=request.data.get("fbp", "") or "",
+            meta_fbc=request.data.get("fbc", "") or "",
+            meta_source_url=request.data.get("source_url", "") or "",
+            meta_client_ip=client_ip or "",
+            meta_user_agent=user_agent or "",
         )
         # Attach cart items to the order (they leave the active cart).
         for item in items:
@@ -395,18 +405,9 @@ def checkout(request):
     except Exception:
         logging.getLogger(__name__).exception("push failed for %s", order.uid)
 
-    # Website Purchase -> Meta CAPI (deduped with the browser Pixel via event_id).
-    try:
-        from .services.capi import track_purchase
-        track_purchase(
-            order,
-            fbp=request.data.get("fbp"),
-            fbc=request.data.get("fbc"),
-            event_source_url=request.data.get("source_url"),
-            request=request,
-        )
-    except Exception:  # tracking must never break checkout
-        logging.getLogger(__name__).exception("CAPI purchase failed for %s", order.uid)
+    # NOTE: no Purchase fires here. COD orders are unconfirmed until an admin
+    # phone-verifies them; the Purchase fires on that confirm so cancelled reviews
+    # never report a conversion. Attribution was stashed on the order above.
 
     data = OrderSerializer(order, context={"request": request}).data
     return Response(data, status=status.HTTP_201_CREATED)
@@ -592,3 +593,108 @@ def nudge_event(request):
     DailyStat.objects.get_or_create(date=today)
     DailyStat.objects.filter(date=today).update(**{field: F(field) + 1})
     return Response({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Analytics collector
+# --------------------------------------------------------------------------- #
+
+class BeaconJSONParser(JSONParser):
+    """Parse a JSON body sent as text/plain.
+
+    `navigator.sendBeacon` is the only way to capture the last event before a tab
+    closes, and it can only send CORS-safelisted content types without a
+    preflight — a preflight during unload is routinely cancelled by the browser.
+    So the beacon posts JSON labelled text/plain and we decode it here.
+    """
+    media_type = "text/plain"
+
+
+@api_view(["POST"])
+@parser_classes([JSONParser, BeaconJSONParser])
+@permission_classes([AllowAny])
+def track(request):
+    """Public beacon endpoint: `POST /api/t/` with one batch of events.
+
+    Body (short keys — this travels over 2G):
+        {"v": visitor_id, "s": session_id, "n": 1 if first-ever visit,
+         "r": referrer, "u": utm_source, "f": 1 if the URL had fbclid,
+         "e": [{"n": name, "p": path, "c": combo_id, "pr": product_id,
+                "v": value, "x": {...props}}]}
+
+    Always answers 204 — tracking must never surface an error to a customer, and
+    sendBeacon ignores the body anyway. Validation happens in services.analytics.
+    """
+    from .services import analytics
+
+    visitor_id = str(request.data.get("v") or "")[:32]
+    session_id = str(request.data.get("s") or "")[:32]
+    events = request.data.get("e")
+    if not visitor_id or not session_id or not isinstance(events, list):
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    if analytics.rate_limited(visitor_id):
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    try:
+        analytics.record_batch(
+            visitor_id=visitor_id,
+            session_id=session_id,
+            events=events,
+            referrer=str(request.data.get("r") or "")[:300],
+            utm_source=str(request.data.get("u") or "")[:40],
+            has_fbclid=bool(request.data.get("f")),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            is_new_visitor=bool(request.data.get("n")),
+        )
+    except Exception:
+        # A tracking failure must never break a page or leak a stack trace.
+        logging.getLogger(__name__).exception("analytics batch failed")
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --------------------------------------------------------------------------- #
+# Steadfast delivery webhook (inbound)
+# --------------------------------------------------------------------------- #
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def steadfast_webhook(request):
+    """Steadfast pushes parcel status + tracking messages here.
+
+    Set in their panel (Webhook Integration): Callback Url = this endpoint,
+    Auth Token(Bearer) = `STEADFAST_WEBHOOK_TOKEN`. They send it back as
+    `Authorization: Bearer <token>`, which is the ONLY thing standing between a
+    stranger and marking orders delivered — so it is checked first, compared in
+    constant time, and a blank setting refuses everything (fail closed).
+
+    Answers in their documented shape: {"status": "success"|"error", "message"}.
+    """
+    import hmac
+
+    from .services import steadfast_webhook as hook
+
+    expected = settings.COURIER.get("STEADFAST_WEBHOOK_TOKEN") or ""
+    header = request.META.get("HTTP_AUTHORIZATION", "")
+    prefix, _, sent = header.partition(" ")
+    if not expected:
+        logging.getLogger(__name__).error(
+            "Steadfast webhook hit but STEADFAST_WEBHOOK_TOKEN is not set")
+        return Response({"status": "error", "message": "Webhook not configured."},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if prefix.lower() != "bearer" or not hmac.compare_digest(sent.strip(), expected):
+        return Response({"status": "error", "message": "Unauthorized."},
+                        status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        ok, message, _event = hook.handle(request.data)
+    except Exception:
+        # Never hand Steadfast a 500 for a bug of ours: they would retry a body
+        # that can't succeed. Log it and let the polling sweep be the backstop.
+        logging.getLogger(__name__).exception("Steadfast webhook failed")
+        return Response({"status": "error", "message": "Could not process webhook."},
+                        status=status.HTTP_200_OK)
+
+    if not ok:
+        return Response({"status": "error", "message": message},
+                        status=status.HTTP_404_NOT_FOUND)
+    return Response({"status": "success", "message": message})

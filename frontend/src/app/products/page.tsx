@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import ComboCard from "@/components/ComboCard";
+import SearchTracker from "@/components/SearchTracker";
 import StickyCustomize from "@/components/StickyCustomize";
 import { Container } from "@/components/ui/Container";
 import { Eyebrow } from "@/components/ui/Eyebrow";
@@ -55,6 +56,7 @@ export default async function ProductsPage({
 
   return (
     <div className="flex flex-1 flex-col">
+      <SearchTracker term={q} results={listings.length} />
       <Container className="py-8 lg:py-12">
         <Eyebrow>সংগ্রহ</Eyebrow>
         <h1 className="mt-2 font-display text-3xl font-semibold text-plum sm:text-4xl">

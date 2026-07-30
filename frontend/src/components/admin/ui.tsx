@@ -225,9 +225,20 @@ export function Table({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-export function Th({ children, className }: { children?: React.ReactNode; className?: string }) {
+export function Th({ children, className, onClick, title }: {
+  children?: React.ReactNode; className?: string;
+  onClick?: () => void; title?: string;   // set both to make the header a sort toggle
+}) {
   return (
-    <th className={cn("bg-slate-50 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500", className)}>
+    <th
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "bg-slate-50 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500",
+        onClick && "cursor-pointer select-none transition hover:text-plum",
+        className,
+      )}
+    >
       {children}
     </th>
   );

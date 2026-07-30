@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 # Customer-facing subject/body are Bengali (audience is Bengali-only).
 _STATUS_MESSAGES = {
+    "in_review": (
+        "আপনার অর্ডার পেয়েছি",
+        "আপনার অর্ডার (কোড: {uid}) পেয়েছি। আমরা শীঘ্রই ফোন করে নিশ্চিত করব।",
+    ),
     "pending_payment": (
         "আপনার অর্ডার পেয়েছি",
         "আপনার অর্ডার (কোড: {uid}) পেয়েছি। ধন্যবাদ।",
@@ -54,7 +58,11 @@ def _advance_context(order):
     Never invents a number: a blank setting drops the line entirely rather than
     rendering an empty one — same hard rule the salesbot follows.
     """
-    if order.status != "pending_payment":
+    # Ask for the advance while the order still awaits confirmation and hasn't
+    # paid — advance_required is now a mark on an in_review order (legacy orders
+    # may still sit in pending_payment). Once confirmed/paid, drop the ask.
+    if not (order.advance_required and not order.payment_verified
+            and order.status in ("in_review", "pending_payment")):
         return None
     shop = getattr(settings, "SHOP", {}) or {}
     return {

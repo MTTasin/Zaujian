@@ -254,6 +254,77 @@ function ComboForm({
   );
 }
 
+// One row: read-only display + an inline edit form toggled by the pencil.
+function ComboFieldRow({
+  field, onSave, onDelete,
+}: {
+  field: AdminComboField;
+  onSave: (id: number, body: Partial<AdminComboField>) => Promise<void>;
+  onDelete: (id: number) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [label, setLabel] = useState(field.label);
+  const [placeholder, setPlaceholder] = useState(field.placeholder);
+  const [required, setRequired] = useState(field.required);
+  const [busy, setBusy] = useState(false);
+
+  function start() {
+    setLabel(field.label);
+    setPlaceholder(field.placeholder);
+    setRequired(field.required);
+    setEditing(true);
+  }
+
+  async function commit() {
+    if (!label.trim()) return;
+    setBusy(true);
+    await onSave(field.id, { label, placeholder, required });
+    setBusy(false);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-wrap items-end gap-3 px-3 py-2">
+        <div className="min-w-40 flex-1">
+          <Field label="Label">
+            <TextInput value={label} onChange={(e) => setLabel(e.target.value)} />
+          </Field>
+        </div>
+        <div className="min-w-40 flex-1">
+          <Field label="Placeholder (optional)">
+            <TextInput value={placeholder} onChange={(e) => setPlaceholder(e.target.value)} />
+          </Field>
+        </div>
+        <label className="flex items-center gap-2 pb-2 text-sm text-slate-700">
+          <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+          Required
+        </label>
+        <AdminButton type="button" onClick={commit} disabled={busy} icon="check">Save</AdminButton>
+        <button type="button" onClick={() => setEditing(false)} className="pb-2 text-sm text-slate-500 hover:underline">
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-2 text-sm">
+      <span className="font-medium text-slate-800">{field.label}</span>
+      {field.placeholder && <span className="text-slate-400">{field.placeholder}</span>}
+      <span className={`text-xs ${field.required ? "text-plum" : "text-slate-400"}`}>
+        {field.required ? "required" : "optional"}
+      </span>
+      <button onClick={start} className="ml-auto text-slate-500 hover:text-plum" aria-label="Edit field">
+        <Icon name="edit" size={16} />
+      </button>
+      <button onClick={() => onDelete(field.id)} className="text-red-600" aria-label="Delete field">
+        <Icon name="trash" size={16} />
+      </button>
+    </div>
+  );
+}
+
 // Questions the customer answers on the combo page before adding to cart.
 // Mirrors the per-product "Customer input fields" manager.
 function ComboFields({ comboId }: { comboId: number }) {
@@ -287,6 +358,16 @@ function ComboFields({ comboId }: { comboId: number }) {
     load();
   }
 
+  async function save(id: number, body: Partial<AdminComboField>) {
+    setError("");
+    try {
+      await adminComboFields.update(id, body);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    }
+  }
+
   return (
     <div className="mt-4 border-t border-slate-100 pt-4">
       <p className="mb-1 text-sm font-semibold text-slate-800">Customer input fields</p>
@@ -299,16 +380,7 @@ function ComboFields({ comboId }: { comboId: number }) {
       {rows.length > 0 && (
         <div className="mb-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
           {rows.map((f) => (
-            <div key={f.id} className="flex items-center gap-3 px-3 py-2 text-sm">
-              <span className="font-medium text-slate-800">{f.label}</span>
-              {f.placeholder && <span className="text-slate-400">{f.placeholder}</span>}
-              <span className={`text-xs ${f.required ? "text-plum" : "text-slate-400"}`}>
-                {f.required ? "required" : "optional"}
-              </span>
-              <button onClick={() => del(f.id)} className="ml-auto text-red-600" aria-label="Delete field">
-                <Icon name="trash" size={16} />
-              </button>
-            </div>
+            <ComboFieldRow key={f.id} field={f} onSave={save} onDelete={del} />
           ))}
         </div>
       )}

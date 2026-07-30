@@ -21,6 +21,7 @@ import {
 // payment form below; no need for a "waiting for payment" step in the tracker.
 const STEPS = ["confirmed", "in_production", "shipped", "delivered"];
 const STATUS_LABEL: Record<string, string> = {
+  in_review: "যাচাই করা হচ্ছে",
   pending_payment: "পেমেন্টের অপেক্ষায়",
   confirmed: "নিশ্চিত হয়েছে",
   in_production: "তৈরি হচ্ছে",
@@ -29,6 +30,7 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "বাতিল",
 };
 const STATUS_TONE: Record<string, "gold" | "success" | "error" | "neutral"> = {
+  in_review: "gold",
   pending_payment: "gold",
   confirmed: "gold",
   in_production: "gold",
@@ -88,7 +90,11 @@ function TrackInner() {
     );
   }
 
-  const needPayment = order.advance_required && !submitted && order.status === "pending_payment";
+  // Advance is asked while the order still awaits confirmation (new orders sit in
+  // in_review; legacy ones in pending_payment) and hasn't paid yet.
+  const needPayment =
+    order.advance_required && !submitted &&
+    (order.status === "in_review" || order.status === "pending_payment");
   const stepIdx = STEPS.indexOf(order.status);
   const cancelled = order.status === "cancelled";
 
@@ -205,7 +211,7 @@ function TrackInner() {
           </form>
         )}
 
-        {submitted && order.status === "pending_payment" && (
+        {submitted && (order.status === "in_review" || order.status === "pending_payment") && (
           <div className="flex items-center justify-center gap-2 rounded-2xl bg-surface p-4 text-center text-sm shadow-sm ring-1 ring-border">
             <span className="text-success"><Icon name="check" size={18} /></span>
             পেমেন্ট তথ্য পেয়েছি, যাচাই চলছে।

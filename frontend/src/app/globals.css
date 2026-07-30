@@ -123,3 +123,136 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Admin dark mode — ADMIN ONLY.
+
+   The panel is built from Tailwind's default slate/red/emerald/amber ramps plus
+   bg-white. In Tailwind v4 every utility reads a CSS variable, so remapping
+   those variables under one attribute flips the whole panel without touching a
+   single component — and the Bengali storefront, which has no dark theme by
+   design, is never affected because the attribute only exists while /admin is
+   mounted (see AdminLayout).
+
+   `--color-white` is deliberately NOT remapped: `text-white` sits on the plum
+   buttons and must stay white. `.bg-white` is handled explicitly below.
+   -------------------------------------------------------------------------- */
+
+:root {
+  /* Chart colors live here so both themes can restyle recharts, which takes
+     hex strings rather than classes. */
+  --chart-grid: #e2e8f0;
+  --chart-axis: #94a3b8;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-text: #0f172a;
+  --chart-plum: #5b2a4e;
+  --chart-gold: #a9822f;
+  --chart-green: #2e7d5b;
+  --chart-blue: #3b6ea5;
+  --chart-violet: #7c4d8b;
+  --chart-amber: #b4791f;
+  --chart-red: #b4442f;
+}
+
+[data-admin-theme="dark"] {
+  /* Slate ramp inverted: 50 is now the darkest surface, 900 the brightest text. */
+  --color-slate-50: #0f141c;
+  --color-slate-100: #1a2130;
+  --color-slate-200: #273143;
+  --color-slate-300: #3a465e;
+  --color-slate-400: #7f8b9e;
+  --color-slate-500: #9aa5b6;
+  --color-slate-600: #b6bfcd;
+  --color-slate-700: #d0d7e2;
+  --color-slate-800: #e3e8ef;
+  --color-slate-900: #f3f6fa;
+
+  /* Status tints: pale washes become deep ones, and the text on them lifts to
+     stay readable at the same contrast the light theme has. */
+  --color-red-50: #2a1315;
+  --color-red-100: #3a191c;
+  --color-red-500: #f87171;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-emerald-50: #0c231c;
+  --color-emerald-100: #113026;
+  --color-emerald-600: #34d399;
+  --color-emerald-700: #6ee7b7;
+  --color-amber-50: #251b09;
+  --color-amber-100: #33260c;
+  --color-amber-600: #fbbf24;
+  --color-amber-700: #fcd34d;
+  --color-blue-100: #16233a;
+  --color-blue-600: #60a5fa;
+  --color-blue-700: #93c5fd;
+  --color-violet-100: #241a38;
+  --color-violet-700: #c4b5fd;
+  --color-indigo-100: #1a1f3c;
+  --color-indigo-700: #a5b4fc;
+
+  /* Page chrome outside the layout's own background (overscroll, scrollbar). */
+  --background: #0f141c;
+  --foreground: #f3f6fa;
+  color-scheme: dark;
+
+  --chart-grid: #273143;
+  --chart-axis: #7f8b9e;
+  --chart-tooltip-bg: #1a2130;
+  --chart-tooltip-text: #f3f6fa;
+  --chart-plum: #c98fb4;
+  --chart-gold: #d9b877;
+  --chart-green: #4ade80;
+  --chart-blue: #7fb0ea;
+  --chart-violet: #c4a2d8;
+  --chart-amber: #fbbf24;
+  --chart-red: #f87171;
+}
+
+/* Cards and inputs: bg-white is a real surface, not the color white. */
+[data-admin-theme="dark"] .bg-white {
+  background-color: #151c28;
+}
+
+/* The plum accent is a deep brand color — readable as a button fill on dark,
+   far too dark as text or a border. Those get a lifted tint instead. */
+[data-admin-theme="dark"] .bg-plum {
+  background-color: #7a3a67;
+}
+[data-admin-theme="dark"] .text-plum {
+  color: #d99cc0;
+}
+[data-admin-theme="dark"] .border-plum {
+  border-color: #a35d8b;
+}
+[data-admin-theme="dark"] .text-gold {
+  color: #d9b877;
+}
+[data-admin-theme="dark"] .hover\:bg-wine:hover {
+  background-color: #5b2a4e;
+}
+/* Recharts draws its own SVG text; keep axis labels legible. */
+[data-admin-theme="dark"] .recharts-text {
+  fill: #9aa5b6;
+}
+
+/* Printing (challans, order slips) must stay on white paper regardless of the
+   screen theme — dark text on a dark card would print as nothing. */
+@media print {
+  [data-admin-theme="dark"] {
+    --color-slate-50: #f8fafc;
+    --color-slate-100: #f1f5f9;
+    --color-slate-200: #e2e8f0;
+    --color-slate-300: #cbd5e1;
+    --color-slate-400: #94a3b8;
+    --color-slate-500: #64748b;
+    --color-slate-600: #475569;
+    --color-slate-700: #334155;
+    --color-slate-800: #1e293b;
+    --color-slate-900: #0f172a;
+    --background: #ffffff;
+    --foreground: #0f172a;
+    color-scheme: light;
+  }
+  [data-admin-theme="dark"] .bg-white { background-color: #ffffff; }
+  [data-admin-theme="dark"] .text-plum { color: #5b2a4e; }
+}

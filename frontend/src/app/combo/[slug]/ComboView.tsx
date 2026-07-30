@@ -10,6 +10,7 @@ import { Icon } from "@/components/ui/Icon";
 import { PriceTag } from "@/components/ui/PriceTag";
 import { useCustomerInputs } from "@/components/configurator/CustomerInputs";
 import { addComboToCart, editComboCartItem, getCart, mediaUrl, type ComboDetail } from "@/lib/api";
+import { trackComboView } from "@/lib/analytics";
 
 type Answers = { fields?: { label: string; value: string }[]; note?: string };
 
@@ -25,6 +26,11 @@ export default function ComboView({
   editId?: number;
 }) {
   const [initial, setInitial] = useState<Answers | null>(editId ? null : {});
+
+  // One "listing viewed" per mount — feeds the views→orders conversion table.
+  useEffect(() => {
+    trackComboView(combo.id, combo.name);
+  }, [combo.id, combo.name]);
 
   useEffect(() => {
     if (!editId) return;

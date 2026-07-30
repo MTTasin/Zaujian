@@ -5,6 +5,9 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { adminGet, clearToken, getToken, getPushKey, pushSubscribe } from "@/lib/adminApi";
+import {
+  applyTheme, clearTheme, getStoredTheme, nextTheme, storeTheme, type AdminTheme,
+} from "@/lib/adminTheme";
 import { Icon, type IconName } from "@/components/ui/Icon";
 
 // VAPID public keys are base64url; PushManager needs a Uint8Array.
@@ -67,6 +70,8 @@ function beep(kind: "chat" | "order" = "chat") {
 const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/admin", label: "Dashboard", icon: "grid" },
   { href: "/admin/orders", label: "Orders", icon: "cart" },
+  { href: "/admin/analytics", label: "Analytics", icon: "chart" },
+  { href: "/admin/finance", label: "Finance", icon: "wallet" },
   { href: "/admin/fraud-check", label: "Fraud Check", icon: "phone" },
   { href: "/admin/leads", label: "Leads", icon: "user" },
   { href: "/admin/capi-events", label: "CAPI Events", icon: "star" },
@@ -88,6 +93,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [waiting, setWaiting] = useState(0);
   const [newOrders, setNewOrders] = useState(0);
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Lazy initializer, not an effect: on the server it resolves to "light" and
+  // the toggle isn't rendered until `ready` flips post-mount, so there is
+  // nothing for hydration to mismatch on.
+  const [theme, setTheme] = useState<AdminTheme>(getStoredTheme);
   const prevWaiting = useRef(0);
   const prevOrders = useRef<number | null>(null);
 
@@ -98,6 +107,19 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }, [isLogin, pathname, router]);
 
   useEffect(() => setMobileOpen(false), [pathname]);
+
+  // Dark mode is the admin's own setting, not the OS's — the storefront has no
+  // dark theme, so the attribute is stripped the moment this layout unmounts.
+  useEffect(() => {
+    applyTheme(theme);
+    return clearTheme;
+  }, [theme]);
+
+  function toggleTheme() {
+    const next = nextTheme(theme);
+    setTheme(next);
+    storeTheme(next);
+  }
 
   useEffect(() => {
     if (isLogin || !getToken()) return;
@@ -198,8 +220,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <div className="mb-6 pt-1">{brand}</div>
           <nav className="flex flex-1 flex-col gap-1">{NAV.map(navItem)}</nav>
           <button
+            onClick={toggleTheme}
+            className="mt-4 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+          >
+            <Icon name={theme === "dark" ? "sun" : "moon"} size={18} />
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
+          <button
             onClick={logout}
-            className="mt-4 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-red-500 transition hover:bg-red-50"
+            className="mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-red-500 transition hover:bg-red-50"
           >
             <Icon name="logout" size={18} /> Log out
           </button>
@@ -210,13 +239,22 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           {/* Mobile top bar */}
           <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:hidden print:hidden">
             {brand}
-            <button
-              onClick={() => setMobileOpen((v) => !v)}
-              aria-label="Menu"
-              className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
-            >
-              <Icon name={mobileOpen ? "x" : "menu"} size={22} />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={toggleTheme}
+                aria-label={theme === "dark" ? "Light mode" : "Dark mode"}
+                className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
+              >
+                <Icon name={theme === "dark" ? "sun" : "moon"} size={20} />
+              </button>
+              <button
+                onClick={() => setMobileOpen((v) => !v)}
+                aria-label="Menu"
+                className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
+              >
+                <Icon name={mobileOpen ? "x" : "menu"} size={22} />
+              </button>
+            </div>
           </div>
           {mobileOpen && (
             <div className="border-b border-slate-200 bg-white p-3 md:hidden">

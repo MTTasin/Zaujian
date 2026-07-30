@@ -46,6 +46,7 @@ Set these in the Python App's **Environment variables** section (recommended) �
 | `EMAIL_HOST` `EMAIL_HOST_USER` `EMAIL_HOST_PASSWORD` `EMAIL_PORT` `EMAIL_USE_SSL` `DEFAULT_FROM_EMAIL` | your SMTP (as in local `.env`) |
 | `STEADFAST_FRAUD_USER` `STEADFAST_FRAUD_PASSWORD` `PATHAO_FRAUD_USER` `PATHAO_FRAUD_PASSWORD` | courier fraud-check logins |
 | `STEADFAST_API_KEY` `STEADFAST_SECRET_KEY` | Steadfast consignment API |
+| `STEADFAST_WEBHOOK_TOKEN` | secret for the **inbound** Steadfast webhook — invent a long random string, put the same one in their panel (see below). Blank = the endpoint refuses everything. |
 | `FRAUD_MIN_SUCCESS_RATIO` | `70` |
 | `DELIVERY_CHARGE` `ADVANCE_AMOUNT` `BKASH_NUMBER` `NAGAD_NUMBER` | shop settings |
 | `DEEPSEEK_API_KEY` | chatbot |
@@ -91,6 +92,38 @@ Add in the Node App's **Environment variables**:
 | `NEXT_PUBLIC_META_PIXEL_ID` | `1504590814166492` |
 | `NEXT_PUBLIC_SITE_URL` | `https://zaujain.mttasin.com` |
 
+**Also set these two — they are the difference between ~43 and ~12 threads per
+Node instance** (runtime vars, no rebuild needed, restart the app after):
+
+| Key | Value | Why |
+|-----|-------|-----|
+| `NODE_OPTIONS` | `--v8-pool-size=2` | V8 sizes its worker pool to the **host's** core count, not your plan. On a 16–32 core shared box that is 16–32 threads doing nothing for a site this size. |
+| `UV_THREADPOOL_SIZE` | `2` | libuv's fs/DNS pool, default 4. |
+
+### cPanel "Number of Processes 101/200" with one visitor
+Not a bug and not real load — CloudLinux LVE counts **threads** against `nproc`.
+A default Node process on a big host carries ~43 threads, and LiteSpeed keeps
+**two** instances of the app warm: 43 × 2 = 86, plus the other apps ≈ 101.
+Physical memory sitting at 354 MB / 4 GB is the proof that nothing is actually
+busy.
+
+It still needs fixing, because the resource graph shows **Nproc faults** — once a
+traffic spike makes LiteSpeed start a third instance the account hits 200 and
+requests get refused. Order of impact:
+
+1. The two env vars above (biggest win, entirely in your control).
+2. Ask the host to cap the `zaujain.xyz` Node app at **one instance** — only they
+   can change the `lsnode` pool. Halves whatever remains.
+3. Remove Node/Python apps you no longer use (the `crm.mttasin.com` app was 11
+   threads) and **restart** so stale workers are reaped.
+4. Backend: 4 `lswsgi` workers for `backzaujain` is more than this traffic needs;
+   ask for 2.
+
+Verify after restarting — thread count per PID, not process count:
+```bash
+ps -o pid,nlwp,cmd -u "$USER" | sort -k2 -n -r | head
+```
+
 ### 4. Install + build + start
 In the Node app terminal:
 ```bash
@@ -108,27 +141,99 @@ Then **Restart** the Node app. Verify `https://zaujain.mttasin.com` loads, produ
 
 ---
 
+## Steadfast delivery webhook (one-time setup)
+Turns parcel status from "press Sync and wait" into a live push, and is the **only**
+source of the hub-by-hub tracking history.
+
+1. Pick a long random secret. Set `STEADFAST_WEBHOOK_TOKEN` to it in the cPanel
+   Python App env vars → **restart** the app.
+2. Steadfast panel → **Webhook** (`steadfast.com.bd/user/webhook/add`):
+   - **Callback Url**: `https://backzaujain.mttasin.com/api/steadfast/webhook/`
+   - **Auth Token(Bearer)**: the same secret
+   - Save.
+3. Verify with a real parcel: after the next status change, the order-detail
+   Steadfast card shows a **Tracking history** entry, and Django admin →
+   *Consignment events* has the raw push. Nothing there after a status change →
+   check the token first (a wrong one answers 401).
+
+The bulk "Sync Steadfast (shipped)" button stays as the backstop for missed pushes;
+don't remove it. Blank token = endpoint answers 503 to everyone, by design.
+
 ## Post-deploy checklist
 - [ ] **AutoSSL** issued for both subdomains (https works).
 - [ ] Frontend → backend API calls succeed (CORS = `https://zaujain.mttasin.com`).
 - [ ] Product/hero **images load** (media served).
 - [ ] Admin login works at `zaujain.mttasin.com/admin` (token) and `backzaujain.mttasin.com/admin` (Django).
 - [ ] Place a **test order** → confirm + book Steadfast → challan prints.
+- [ ] Steadfast **webhook** saved in their panel + `STEADFAST_WEBHOOK_TOKEN` set (see above).
 - [ ] Meta **Purchase** fires (with `META_TEST_EVENT_CODE` set → Test Events; then blank it for live).
 
+## Server paths (current host)
+```
+App root :  /home/mttasinc/backzaujain.mttasin.com
+Venv     :  /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13
+Python   :  /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python
+```
+Enter the env in cPanel → **Terminal**:
+```
+source /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/activate && cd /home/mttasinc/backzaujain.mttasin.com
+```
+Restart from Terminal (same effect as the cPanel Restart button):
+```
+mkdir -p tmp && touch tmp/restart.txt
+```
+Prefer Terminal over the Python App page's "Execute python script" box — the box
+swallows tracebacks. **Never run `makemigrations` on the server**: migrations are
+source files, generated locally and uploaded; generating them here forks history.
+
 ## Cron jobs (no job queue)
-cPanel → **Cron Jobs**. Use the venv Python + the backend app root.
+cPanel → **Cron Jobs**. Full paths — cron has no venv and no PATH.
+
+**Timing.** Customers browse this site at 2–3am; ~4am is the quiet gap, so the
+batch jobs run then. Each job is a separate process loading all of Django
+(~80–150MB), and this account has hit its NPROC ceiling before — so they are
+**staggered 15 min apart, never stacked on the same minute**.
+
+**Timezone.** Django is `Asia/Dhaka`, so `rollup_analytics` always aggregates a
+Dhaka day. But cPanel cron fires in the **server's** timezone — check the server
+time on the cPanel home page and shift the hour if it isn't Dhaka (server on UTC
+→ 04:10 Dhaka = `10 22 * * *`). Getting it wrong doesn't corrupt anything, it
+just runs the batch during peak traffic.
+
+| Job | Cron | Dhaka time |
+|---|---|---|
+| `rollup_analytics` | `10 4 * * *` | 04:10 daily |
+| `purge_analytics` | `25 4 * * *` | 04:25 daily (**after** rollup) |
+| `purge_old_chat_uploads` | `40 4 * * *` | 04:40 daily |
+| `send_pending_capi` | `*/15 * * * *` | every 15 min |
+| `purge_orphan_media` | `55 4 1 * *` | 04:55, 1st of month |
+
 ```
 # Daily — delete chat images older than 30 days
-cd /home/<user>/backzaujain && /home/<user>/virtualenv/backzaujain/3.13/bin/python manage.py purge_old_chat_uploads >> cron.log 2>&1
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py purge_old_chat_uploads >> cron.log 2>&1
 
 # Every 15 min (optional) — retry any failed Meta CAPI events
-cd /home/<user>/backzaujain && /home/<user>/virtualenv/backzaujain/3.13/bin/python manage.py send_pending_capi >> cron.log 2>&1
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py send_pending_capi >> cron.log 2>&1
 
 # Monthly — delete media files no DB row references (safety net for django-cleanup)
-cd /home/<user>/backzaujain && /home/<user>/virtualenv/backzaujain/3.13/bin/python manage.py purge_orphan_media >> cron.log 2>&1
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py purge_orphan_media >> cron.log 2>&1
+
+# Daily 04:10 Dhaka — aggregate yesterday's analytics into the permanent rollups.
+# Only ever reads YESTERDAY, so a visitor browsing at 4am is unaffected.
+# MUST run before purge_analytics, or a day could be deleted before it was rolled up.
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py rollup_analytics >> cron.log 2>&1
+
+# Daily 04:25 — drop raw analytics events/sessions past the 90-day window (rollups are kept forever)
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py purge_analytics >> cron.log 2>&1
 ```
-(Adjust the venv path to the one cPanel shows for the Python App.)
+
+**If a rollup night is missed** (server down, cron misfired), backfill — it is
+idempotent, so re-running a day just overwrites it:
+```
+python manage.py rollup_analytics --days 7          # last 7 days
+python manage.py rollup_analytics --date 2026-07-20 # one specific day
+```
+(If the host ever moves the account, re-read the venv path off the cPanel Python App page.)
 
 **One-time backlog clean after first deploy:** django-cleanup only prevents
 *new* orphans, so clear the historical pile once. Review first with a dry run,

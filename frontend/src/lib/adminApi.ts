@@ -75,13 +75,57 @@ export interface AnalyticsData {
   status_breakdown: { status: string; count: number }[];
 }
 
+// ---- Storefront analytics (self-hosted) ----
+
+export interface LiveData {
+  active: number;
+  window_seconds: number;
+  by_path: { path: string; count: number }[];
+  by_device: { device: string; count: number }[];
+  in_cart: number;
+  in_checkout: number;
+  in_wizard: number;
+  recent: { name: string; path: string; ts: string; label: string }[];
+}
+
+export interface AnalyticsOverview {
+  days: number;
+  today: {
+    date: string; sessions: number; visitors: number; new_visitors: number;
+    pageviews: number; bounced_sessions: number; converted_sessions: number;
+    bounce_rate: number; avg_seconds: number;
+  };
+  live: Omit<LiveData, "recent">;
+  trend: { date: string; visitors: number; sessions: number; pageviews: number }[];
+  top_pages: {
+    path: string; views: number; sessions: number; entries: number; exits: number;
+    /** Listing / gallery-tag name for catalogue paths — the slug alone is opaque. */
+    label?: string;
+  }[];
+  top_combos: {
+    combo_id: number; name: string; views: number; carts: number;
+    orders: number; revenue: number; conversion: number;
+  }[];
+  sources: { source: string; sessions: number; orders: number }[];
+  funnel: { step: string; sessions: number }[];
+  empty_searches: { term: string; count: number }[];
+  devices: { device: string; sessions: number }[];
+}
+
+export const getLive = () => adminGet<LiveData>("analytics/live/");
+export const getOverview = (days: number) =>
+  adminGet<AnalyticsOverview>(`analytics/overview/?days=${days}`);
+
 export interface DashboardData {
   orders_today: number;
   pending_payment: number;
   pending_custom: number;
   total_orders: number;
-  total_profit: number;
-  uncosted_count: number;
+  // Money is business-wide now (Finance cash-book), not per order.
+  month_income: number;
+  month_expense: number;
+  month_net: number;
+  dues_total: number;
   recent_orders: AdminOrder[];
   visitors_today: number;
   popups_shown_today: number;
@@ -119,6 +163,7 @@ export interface ItemConfig {
 export interface AdminOrderItem {
   id: number;
   product: number | null;
+  combo: number | null;
   product_name: string;
   category: string;
   price_snapshot: string;
@@ -127,6 +172,21 @@ export interface AdminOrderItem {
   config: ItemConfig;
   config_display: ConfigLine[];
 }
+
+/**
+ * One push from Steadfast's webhook. `delivery_status` carries a status;
+ * `tracking_update` is the hub-by-hub narration their API cannot be polled for —
+ * it exists only because they pushed it.
+ */
+export type ConsignmentEvent = {
+  id: number;
+  notification_type: "delivery_status" | "tracking_update" | string;
+  status: string;
+  tracking_message: string;
+  /** Steadfast's own timestamp string, kept verbatim (no timezone documented). */
+  event_time: string;
+  received_at: string;
+};
 
 export type ExtraConsignment = {
   id: number;
@@ -140,6 +200,7 @@ export type ExtraConsignment = {
   recipient_address: string;
   item_description: string;
   created_at: string;
+  events: ConsignmentEvent[];
 };
 
 export interface AdminOrder {
@@ -162,8 +223,6 @@ export interface AdminOrder {
   advance_amount: string;
   advance_received: string;
   cod_amount: string;
-  cost_price: string | null;
-  profit: string | null;
   payment_method: string;
   transaction_id: string;
   payment_screenshot: string | null;
@@ -178,7 +237,35 @@ export interface AdminOrder {
   created_at: string;
   items: AdminOrderItem[];
   extra_consignments: ExtraConsignment[];
+  /** Primary parcel's timeline; each extra carries its own under itself. */
+  consignment_events: ConsignmentEvent[];
 }
+
+/**
+ * One pickable thing for the manual-order item picker. `fields` are the detail
+ * labels the storefront would ask for (বরের নাম, তারিখ…) — prefilled empty so the
+ * owner can paste in what the customer sent on WhatsApp.
+ */
+export interface CatalogueEntry {
+  id: number;
+  name: string;
+  category: string;
+  price: string;
+  image: string | null;
+  fields: string[];
+  /** Products only. */
+  kind?: ProductKind;
+  customizable?: boolean;
+}
+
+export interface OrderCatalogue {
+  /** Buyable listings (PrebuiltCombo) — what the storefront actually sells. */
+  listings: CatalogueEntry[];
+  /** Customizer building blocks; sold directly only over chat. */
+  products: CatalogueEntry[];
+}
+
+export const getOrderCatalogue = () => adminGet<OrderCatalogue>("orders/catalogue/");
 
 export interface AdminCustomRequest {
   id: number;
@@ -339,6 +426,8 @@ export interface AdminComboField {
 export const adminComboFields = {
   list: (comboId: number) => adminGet<AdminComboField[]>(`combo-fields/?combo=${comboId}`),
   create: (body: Partial<AdminComboField>) => adminPost<AdminComboField>("combo-fields/", body),
+  update: (id: number, body: Partial<AdminComboField>) =>
+    adminPatch<AdminComboField>(`combo-fields/${id}/`, body),
   remove: (id: number) => adminDelete(`combo-fields/${id}/`),
 };
 
@@ -485,6 +574,7 @@ export const adminGallery = {
 };
 
 export const ORDER_STATUSES = [
+  "in_review",
   "pending_payment",
   "confirmed",
   "in_production",
@@ -493,9 +583,42 @@ export const ORDER_STATUSES = [
   "cancelled",
 ] as const;
 
-// Only pending/cancelled orders can be hard-deleted (backend enforces too).
-export const ORDER_DELETABLE = new Set(["pending_payment", "cancelled"]);
+// ?sort= values the Orders list offers. Keys must match AdminOrderViewSet.SORTS;
+// the default ("status") is the workflow-priority order defined server-side.
+export const ORDER_SORTS = [
+  { value: "status", label: "Status (workflow order)" },
+  { value: "-status", label: "Status (reverse)" },
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "total_high", label: "Total: high → low" },
+  { value: "total_low", label: "Total: low → high" },
+  { value: "name", label: "Customer A → Z" },
+  { value: "-name", label: "Customer Z → A" },
+  { value: "code", label: "Code A → Z" },
+  { value: "-code", label: "Code Z → A" },
+  { value: "district", label: "District A → Z" },
+  { value: "-district", label: "District Z → A" },
+  { value: "paid", label: "Paid first" },
+  { value: "unpaid", label: "Unpaid first" },
+  { value: "courier", label: "Courier booked first" },
+  { value: "no_courier", label: "Not booked first" },
+  { value: "repeat", label: "Repeat customers first" },
+] as const;
+
+// Only unconfirmed/cancelled orders can be hard-deleted (backend enforces too).
+export const ORDER_DELETABLE = new Set(["in_review", "pending_payment", "cancelled"]);
 export const deleteOrder = (id: number) => adminDelete(`orders/${id}/`);
+
+// Bulk Steadfast sweep: checks only `shipped` orders, flips the delivered ones to
+// `delivered`. Batched server-side — `remaining > 0` means press it again.
+export type SteadfastSync = {
+  checked: number;
+  delivered: string[];
+  delivered_count: number;
+  errors: { uid: string; error: string }[];
+  remaining: number;
+};
+export const syncSteadfast = () => adminPost<SteadfastSync>("orders/sync_steadfast/", {});
 // Clears the "new orders" badge/sound — call when the Orders page opens.
 export const markOrdersSeen = () => adminPost("orders/mark_seen/", {});
 

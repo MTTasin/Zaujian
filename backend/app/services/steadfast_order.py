@@ -135,13 +135,13 @@ def create_consignment(order, invoice=None, overrides=None):
     }
 
 
-def get_status(order):
-    """Fetch the parcel's current delivery status from Steadfast (by consignment id)."""
+def get_status_by_cid(cid):
+    """Fetch a parcel's current delivery status from Steadfast by consignment id.
+    Used for the primary consignment and each additional one."""
     base = _cfg("STEADFAST_API_BASE", "https://portal.packzy.com/api/v1")
     timeout = _cfg("TIMEOUT_SECONDS", 3)
-    cid = order.steadfast_consignment_id
     if not cid:
-        raise SteadfastError("No consignment booked for this order")
+        raise SteadfastError("No consignment booked")
     if not _cfg("STEADFAST_API_KEY") or not _cfg("STEADFAST_SECRET_KEY"):
         raise SteadfastError("Steadfast API key/secret not configured")
     try:
@@ -155,3 +155,10 @@ def get_status(order):
     except ValueError as exc:
         raise SteadfastError("Steadfast returned non-JSON response") from exc
     return str(data.get("delivery_status") or "")
+
+
+def get_status(order):
+    """Fetch the ORDER's primary parcel delivery status (by its consignment id)."""
+    if not order.steadfast_consignment_id:
+        raise SteadfastError("No consignment booked for this order")
+    return get_status_by_cid(order.steadfast_consignment_id)

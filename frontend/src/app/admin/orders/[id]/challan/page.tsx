@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { adminGet, type AdminOrder } from "@/lib/adminApi";
 import { AdminButton, Loading } from "@/components/admin/ui";
 
 export default function ChallanPage() {
   const { id } = useParams<{ id: string }>();
+  const extraId = useSearchParams().get("extra");
   const [order, setOrder] = useState<AdminOrder | null>(null);
   const [error, setError] = useState("");
 
@@ -19,9 +20,18 @@ export default function ChallanPage() {
   if (error) return <p className="rounded-lg bg-red-50 p-4 text-sm text-red-600">{error}</p>;
   if (!order) return <Loading />;
 
-  const parcelId = order.steadfast_consignment_id || order.uid;
-  const item =
-    order.items.map((i) => i.product_name).filter(Boolean).join(", ") || "Nikah items";
+  // An additional consignment prints its own recipient/parcel; else the order's.
+  const extra = extraId ? order.extra_consignments.find((e) => String(e.id) === extraId) : null;
+  const parcelId = extra
+    ? extra.consignment_id || extra.invoice
+    : order.steadfast_consignment_id || order.uid;
+  const phone = extra ? extra.recipient_phone || order.phone : order.phone;
+  const customerName = extra ? extra.recipient_name || order.customer_name : order.customer_name;
+  const item = extra
+    ? extra.item_description ||
+      order.items.map((i) => i.product_name).filter(Boolean).join(", ") ||
+      "Nikah items"
+    : order.items.map((i) => i.product_name).filter(Boolean).join(", ") || "Nikah items";
 
   return (
     <div>
@@ -50,8 +60,8 @@ export default function ChallanPage() {
           </div>
 
           <ChallanRow label="Parcel ID:" value={parcelId} size="xl" />
-          <ChallanRow label="Customer Mobile:" value={order.phone} size="lg" />
-          <ChallanRow label="Customer Name:" value={order.customer_name} size="lg" />
+          <ChallanRow label="Customer Mobile:" value={phone} size="lg" />
+          <ChallanRow label="Customer Name:" value={customerName} size="lg" />
 
           <div className="flex items-center gap-3">
             <span className="shrink-0 text-3xl text-slate-900">Item:</span>

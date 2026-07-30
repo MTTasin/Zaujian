@@ -47,15 +47,35 @@ class OrderEmailTests(TestCase):
         self.assertIn("Zaujain Nikah Point", html)
 
     @override_settings(SHOP=_shop())
-    def test_pending_payment_shows_advance_and_numbers(self):
-        self.order.status = "pending_payment"
+    def test_advance_review_shows_advance_and_numbers(self):
+        # Advance is now keyed on the flag, not the status: an in_review order
+        # marked advance_required (and unpaid) asks for the advance.
+        self.order.status = "in_review"
+        self.order.advance_required = True
         _, html = self._parts(build_order_email(self.order))
         self.assertIn("200", html)
         self.assertIn("01818974731", html)
         self.assertIn("01974283081", html)
 
     @override_settings(SHOP=_shop())
+    def test_review_without_advance_flag_has_no_numbers(self):
+        self.order.status = "in_review"
+        self.order.advance_required = False
+        _, html = self._parts(build_order_email(self.order))
+        self.assertNotIn("01818974731", html)
+
+    @override_settings(SHOP=_shop())
+    def test_paid_advance_review_drops_the_ask(self):
+        self.order.status = "in_review"
+        self.order.advance_required = True
+        self.order.payment_verified = True
+        _, html = self._parts(build_order_email(self.order))
+        self.assertNotIn("01818974731", html)
+
+    @override_settings(SHOP=_shop())
     def test_other_statuses_carry_no_payment_numbers(self):
+        # Even with the advance flag set, confirmed+ statuses never re-ask.
+        self.order.advance_required = True
         for status in ["confirmed", "in_production", "shipped", "delivered", "cancelled"]:
             self.order.status = status
             _, html = self._parts(build_order_email(self.order))
@@ -64,7 +84,8 @@ class OrderEmailTests(TestCase):
     @override_settings(SHOP=_shop(BKASH_NUMBER="", NAGAD_NUMBER=""))
     def test_blank_payment_numbers_are_omitted_not_rendered_empty(self):
         """Never invent or render a hollow contact line — same rule as the bot."""
-        self.order.status = "pending_payment"
+        self.order.status = "in_review"
+        self.order.advance_required = True
         _, html = self._parts(build_order_email(self.order))
         self.assertNotIn("বিকাশ", html)
         self.assertNotIn("নগদ", html)

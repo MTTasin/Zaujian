@@ -22,14 +22,21 @@ from .models import (
     ColorOption,
     ComboImage,
     ConfigurationImage,
+    ConsignmentEvent,
     CustomOrderReferenceImage,
     CustomOrderRequest,
+    Buyer,
+    CreditPayment,
     DupattaOption,
+    Expense,
+    FinanceCategory,
+    Income,
     InsideDesign,
     Order,
     PrebuiltCombo,
     Product,
     StaticDesign,
+    Supplier,
     ToppingDesign,
 )
 from .services import notifications
@@ -199,6 +206,19 @@ class ConfirmOrderForm(forms.Form):
     )
 
 
+@admin.register(ConsignmentEvent)
+class ConsignmentEventAdmin(admin.ModelAdmin):
+    """Read-only log of what Steadfast pushed — useful when a status looks wrong."""
+    list_display = ("received_at", "consignment_id", "invoice", "notification_type",
+                    "status", "tracking_message", "order")
+    list_filter = ("notification_type", "status")
+    search_fields = ("consignment_id", "invoice", "tracking_message")
+    readonly_fields = [f.name for f in ConsignmentEvent._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     list_display = (
@@ -275,6 +295,8 @@ class OrderAdmin(admin.ModelAdmin):
                 order.courier_submitted = True
                 order.status = Order.Status.CONFIRMED
                 order.save()
+                from .admin_api import _fire_purchase
+                _fire_purchase(order)  # confirm reports the Purchase to Meta
                 notifications.notify_order_status(order)
                 self.message_user(
                     request,
@@ -349,6 +371,69 @@ class ChatSessionAdmin(admin.ModelAdmin):
     list_display = ("id", "customer_name", "phone", "status", "updated_at")
     list_filter = ("status",)
     inlines = [ChatMessageInline]
+
+
+# --------------------------------------------------------------------------- #
+# Finance cash-book (the frontend panel at /admin/finance is the main UI; these
+# registrations are the Django-admin fallback for bulk fixes).
+# --------------------------------------------------------------------------- #
+
+@admin.register(FinanceCategory)
+class FinanceCategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "kind", "order", "active")
+    list_filter = ("kind", "active")
+    list_editable = ("order", "active")
+
+
+@admin.register(Supplier)
+class SupplierAdmin(admin.ModelAdmin):
+    list_display = ("name", "phone", "balance", "active")
+    search_fields = ("name", "phone")
+
+    @admin.display(description="We owe")
+    def balance(self, obj):
+        from .finance_api import contact_balance
+        return contact_balance("payable", obj)
+
+
+@admin.register(Expense)
+class ExpenseAdmin(admin.ModelAdmin):
+    list_display = ("date", "category", "description", "amount", "fee_amount",
+                    "account", "supplier", "is_credit")
+    list_filter = ("account", "is_credit", "category")
+    search_fields = ("description", "reference", "supplier__name")
+    date_hierarchy = "date"
+    filter_horizontal = ("orders",)   # order links are a MARK, not an allocation
+
+
+@admin.register(Buyer)
+class BuyerAdmin(admin.ModelAdmin):
+    list_display = ("name", "phone", "balance", "active")
+    search_fields = ("name", "phone")
+
+    @admin.display(description="Owes us")
+    def balance(self, obj):
+        from .finance_api import contact_balance
+        return contact_balance("receivable", obj)
+
+
+@admin.register(Income)
+class IncomeAdmin(admin.ModelAdmin):
+    list_display = ("date", "category", "description", "amount", "fee_amount",
+                    "account", "buyer", "is_credit")
+    list_filter = ("account", "is_credit", "category")
+    search_fields = ("description", "reference", "buyer__name")
+    date_hierarchy = "date"
+    filter_horizontal = ("orders",)
+
+
+@admin.register(CreditPayment)
+class CreditPaymentAdmin(admin.ModelAdmin):
+    """Payments sit against the CONTACT's running balance, not one invoice."""
+    list_display = ("date", "kind", "supplier", "buyer", "amount", "fee_amount", "account")
+    list_filter = ("kind", "account")
+    search_fields = ("supplier__name", "buyer__name", "note")
+    date_hierarchy = "date"
 
 
 # --------------------------------------------------------------------------- #

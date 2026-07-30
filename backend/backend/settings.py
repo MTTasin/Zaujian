@@ -246,6 +246,20 @@ SHOP = {
 }
 
 
+# Finance cash-book: default MFS/transfer charge per account, in PERCENT of the
+# amount moved. Only used to pre-fill the fee box in the admin — every entry
+# stores its own real fee, since the true rate depends on cash-out vs send-money
+# vs agent. 0 = no charge by default.
+FINANCE_FEE_RATES = {
+    "cash": os.getenv("FINANCE_FEE_CASH", "0"),
+    "bank": os.getenv("FINANCE_FEE_BANK", "0"),
+    "bkash": os.getenv("FINANCE_FEE_BKASH", "1.85"),
+    "nagad": os.getenv("FINANCE_FEE_NAGAD", "1.45"),
+    "card": os.getenv("FINANCE_FEE_CARD", "0"),
+    "other": os.getenv("FINANCE_FEE_OTHER", "0"),
+}
+
+
 # Web Push (browser push notifications for admin — new orders + chat handoffs).
 # Dev defaults let it work out of the box; GENERATE A FRESH PAIR for production
 # and set them as env vars. Regenerate: py-vapid keypair (raw base64url).
@@ -290,6 +304,10 @@ COURIER = {
     ),
     "TIMEOUT_SECONDS": int(os.getenv("COURIER_TIMEOUT_SECONDS", "3")),
     "MIN_SUCCESS_RATIO": float(os.getenv("FRAUD_MIN_SUCCESS_RATIO", "70")),
+    # Shared secret for the INBOUND Steadfast webhook (panel: Webhook Integration
+    # -> Auth Token(Bearer)). Blank = the endpoint refuses every request, because
+    # an unauthenticated caller could otherwise mark orders delivered.
+    "STEADFAST_WEBHOOK_TOKEN": os.getenv("STEADFAST_WEBHOOK_TOKEN", ""),
 }
 
 

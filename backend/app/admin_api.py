@@ -25,6 +25,7 @@ from .models import (
     ComboField,
     ComboImage,
     ConfigurationImage,
+    ConsignmentEvent,
     CustomOrderRequest,
     DupattaOption,
     ExtraConsignment,
@@ -158,6 +159,51 @@ class AdminDupattaSerializer(serializers.ModelSerializer):
         ]
 
 
+def _fire_purchase(order):
+    """Report a website order's Purchase to Meta on confirm. Deduped by event_id,
+    so calling it from confirm AND set_status is safe. Never breaks the action."""
+    try:
+        from .services.capi import fire_order_purchase
+        fire_order_purchase(order)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("CAPI purchase failed for %s", order.uid)
+
+
+# Steadfast's delivery_status value that means the parcel reached the customer.
+# `partial_delivered` deliberately does NOT count — part of the parcel came back.
+# The rule itself lives in services/consignments.py (shared with the webhook).
+from .services.consignments import DELIVERED as STEADFAST_DELIVERED  # noqa: E402
+
+
+def _sync_order_from_steadfast(order):
+    """Refresh `order`'s Steadfast statuses (primary + every extra consignment) and
+    promote the order to `delivered` when ALL of its booked parcels are delivered.
+
+    An order can ship as several consignments, so one delivered parcel is not a
+    delivered order. Returns (changed_to_delivered: bool, statuses: list[str]).
+    Raises SteadfastError — the caller decides whether that aborts the sweep.
+    """
+    from .services.consignments import parcel_statuses, promote_if_all_delivered
+    from .services.steadfast_order import get_status_by_cid
+
+    polled = get_status_by_cid(order.steadfast_consignment_id)
+    if polled != order.steadfast_status:
+        order.steadfast_status = polled
+        order.save(update_fields=["steadfast_status", "updated_at"])
+
+    for ec in order.extra_consignments.all():
+        if not ec.consignment_id:
+            continue              # never booked → cannot be delivered
+        st = get_status_by_cid(ec.consignment_id)
+        if st != ec.status:
+            ec.status = st
+            ec.save(update_fields=["status"])
+
+    # The promotion rule is shared with the webhook so the two can't drift.
+    return promote_if_all_delivered(order), parcel_statuses(order)
+
+
 # --------------------------------------------------------------------------- #
 # Catalog CRUD viewsets  (?product=<id> filter on option endpoints)
 # --------------------------------------------------------------------------- #
@@ -242,6 +288,96 @@ class AdminSiteSettingsSerializer(serializers.ModelSerializer):
         fields = ["hero_image", "hero_title", "hero_subtitle", "band_image"]
 
 
+# --------------------------------------------------------------------------- #
+# Manual (off-website) order lines
+# --------------------------------------------------------------------------- #
+#
+# A WhatsApp/Messenger order is typed in by hand, but it should still end up
+# looking like a website order: linked to the real listing or product (so the
+# order carries its photo and stays editable through the normal option editor)
+# and carrying the details the customer sent in chat (bride/groom name, date,
+# nickname…). Those details go into the SAME config["fields"] shape the
+# storefront uses — label snapshotted next to the value — so renaming a product
+# field later never rewrites a placed order, and every existing surface (cart,
+# order detail, challan) renders them with no extra code.
+
+MANUAL_TEXT_CAP = 200       # same cap cart_add applies to customer-typed answers
+MANUAL_MAX_FIELDS = 20
+
+
+def _dec(v):
+    try:
+        return Decimal(str(v if v not in (None, "") else 0))
+    except Exception:
+        return Decimal("0")
+
+
+def _catalogue_price(combo, product):
+    """Fallback price when the admin leaves the box empty: what the shop charges."""
+    if combo:
+        return combo.price
+    if product:
+        from .services.pricing import price_bounds
+        lo, _hi = price_bounds(product)
+        # A dupatta's option price is absolute, so base_price is only a fallback
+        # for a product with no priced options at all (see CLAUDE.md).
+        return lo or product.base_price
+    return Decimal("0")
+
+
+def _manual_line(it):
+    """One admin-entered item payload -> (product, combo, config, price).
+
+    Returns None for a line with nothing in it. The price the admin typed always
+    wins (snapshot philosophy); the catalogue price is only a default.
+    """
+    combo = product = None
+    if it.get("combo"):
+        combo = PrebuiltCombo.objects.filter(pk=it["combo"]).first()
+    if it.get("product") and combo is None:
+        product = Product.objects.filter(pk=it["product"]).first()
+
+    linked = combo or product
+    title = str(it.get("title") or "").strip()[:MANUAL_TEXT_CAP] or (linked.name if linked else "")
+    if not title:
+        return None
+
+    raw = it.get("price")
+    price = _dec(raw) if raw not in (None, "") else _catalogue_price(combo, product)
+
+    cfg = {"title": title, "manual": True}
+    fields = []
+    for f in (it.get("fields") or [])[:MANUAL_MAX_FIELDS]:
+        label = str(f.get("label") or "").strip()[:MANUAL_TEXT_CAP]
+        value = str(f.get("value") or "").strip()[:MANUAL_TEXT_CAP]
+        if label or value:
+            fields.append({"label": label, "value": value})
+    if fields:
+        cfg["fields"] = fields
+    note = str(it.get("note") or "").strip()[:MANUAL_TEXT_CAP]
+    if note:
+        cfg["note"] = note
+    return product, combo, cfg, price
+
+
+def _manual_lines(items):
+    """Parse a whole items payload, dropping the empty lines."""
+    parsed = (_manual_line(it) for it in (items or []))
+    return [line for line in parsed if line is not None]
+
+
+def _create_manual_items(order, lines):
+    """Write the parsed lines and return the subtotal."""
+    subtotal = Decimal("0")
+    for product, combo, cfg, price in lines:
+        subtotal += price
+        CartItem.objects.create(
+            order=order, session_key="admin",
+            product=product, combo=combo, config=cfg, price_snapshot=price,
+        )
+    return subtotal
+
+
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
 def admin_create_order(request):
@@ -250,19 +386,17 @@ def admin_create_order(request):
     WhatsApp, in person). Body:
     {customer_name, phone, whatsapp?, email?, division?, district?, thana?,
      address?, delivery_charge?, advance_received?, status?,
-     items: [{title, price}, ...]}
+     items: [{title?, price?, product?, combo?, note?,
+              fields?: [{label, value}, ...]}, ...]}
+    A line needs either a title or a linked product/combo; everything else is
+    optional. See _manual_line.
     """
     d = request.data
-    items = d.get("items") or []
-    items = [it for it in items if str(it.get("title", "")).strip()]
-    if not items:
+    lines = _manual_lines(d.get("items"))
+    if not lines:
         return Response({"error": "Add at least one item"}, status=status.HTTP_400_BAD_REQUEST)
 
-    def dec(v):
-        try:
-            return Decimal(str(v or 0))
-        except Exception:
-            return Decimal("0")
+    dec = _dec
 
     order = Order.objects.create(
         customer_name=d.get("customer_name", ""),
@@ -280,18 +414,7 @@ def admin_create_order(request):
         admin_seen=True,  # admin created it — don't alert themselves.
     )
 
-    subtotal = Decimal("0")
-    for it in items:
-        price = dec(it.get("price"))
-        subtotal += price
-        CartItem.objects.create(
-            order=order,
-            session_key="admin",
-            config={"title": str(it.get("title", "")).strip(), "manual": True},
-            price_snapshot=price,
-        )
-
-    order.subtotal = subtotal
+    order.subtotal = _create_manual_items(order, lines)
     order.cod_amount = order.compute_cod()
     order.is_repeat_customer = (
         Order.objects.filter(phone=order.phone).exclude(pk=order.pk).exists()
@@ -511,12 +634,23 @@ class AdminComboImageViewSet(_AdminBase):
 # Orders
 # --------------------------------------------------------------------------- #
 
+class ConsignmentEventSerializer(serializers.ModelSerializer):
+    """One line of a parcel's timeline, as Steadfast pushed it."""
+
+    class Meta:
+        model = ConsignmentEvent
+        fields = ["id", "notification_type", "status", "tracking_message",
+                  "event_time", "received_at"]
+
+
 class ExtraConsignmentSerializer(serializers.ModelSerializer):
+    events = ConsignmentEventSerializer(many=True, read_only=True)
+
     class Meta:
         model = ExtraConsignment
         fields = ["id", "invoice", "consignment_id", "tracking_code", "status",
                   "cod_amount", "recipient_name", "recipient_phone",
-                  "recipient_address", "item_description", "created_at"]
+                  "recipient_address", "item_description", "created_at", "events"]
 
 
 class AdminOrderSerializer(serializers.ModelSerializer):
@@ -524,8 +658,14 @@ class AdminOrderSerializer(serializers.ModelSerializer):
     total = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     full_address = serializers.CharField(read_only=True)
-    profit = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     extra_consignments = ExtraConsignmentSerializer(many=True, read_only=True)
+    consignment_events = serializers.SerializerMethodField()
+
+    def get_consignment_events(self, obj):
+        """The PRIMARY parcel's timeline. Each extra carries its own under itself,
+        so this filters them out rather than mixing two parcels into one story."""
+        rows = [e for e in obj.consignment_events.all() if e.extra_id is None]
+        return ConsignmentEventSerializer(rows, many=True).data
 
     class Meta:
         model = Order
@@ -535,12 +675,11 @@ class AdminOrderSerializer(serializers.ModelSerializer):
             "is_repeat_customer",
             "subtotal", "delivery_charge", "total",
             "advance_required", "advance_amount", "advance_received", "cod_amount",
-            "cost_price", "profit",
             "payment_method", "transaction_id", "payment_screenshot", "payment_verified",
             "fraud_check_result",
             "steadfast_consignment_id", "steadfast_tracking_code", "steadfast_status",
             "courier_submitted", "status", "status_display", "created_at",
-            "items", "extra_consignments",
+            "items", "extra_consignments", "consignment_events",
         ]
         read_only_fields = fields
 
@@ -548,14 +687,53 @@ class AdminOrderSerializer(serializers.ModelSerializer):
 class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAdminUser]
     serializer_class = AdminOrderSerializer
-    queryset = Order.objects.all().prefetch_related("items")
+    queryset = Order.objects.all().prefetch_related(
+        "items", "extra_consignments__events", "consignment_events")
 
     # Only orders with no money/courier history may be hard-deleted; anything
     # further along must be cancelled instead (keeps the audit trail).
-    DELETABLE_STATUSES = {Order.Status.PENDING_PAYMENT, Order.Status.CANCELLED}
+    DELETABLE_STATUSES = {
+        Order.Status.IN_REVIEW, Order.Status.PENDING_PAYMENT, Order.Status.CANCELLED,
+    }
+
+    # Default list order: the admin's attention order, not the DB's. Rows that
+    # need a phone call come first, finished/dead ones sink. Reorder this list to
+    # change the default sort — nothing else depends on the positions.
+    STATUS_PRIORITY = [
+        Order.Status.IN_REVIEW,
+        Order.Status.PENDING_PAYMENT,   # legacy, same "needs review" bucket
+        Order.Status.IN_PRODUCTION,
+        Order.Status.CONFIRMED,
+        Order.Status.SHIPPED,
+        Order.Status.DELIVERED,
+        Order.Status.CANCELLED,
+    ]
+
+    # Whitelisted ?sort= values → order_by() args. `_total` is an annotation
+    # added below (Order.total is a Python property, so the DB can't sort on it).
+    SORTS = {
+        "status": None,                 # workflow priority (default), see below
+        "-status": None,
+        "newest": ["-created_at"],
+        "oldest": ["created_at"],
+        "total_high": ["-_total", "-created_at"],
+        "total_low": ["_total", "-created_at"],
+        "name": ["customer_name", "-created_at"],
+        "-name": ["-customer_name", "-created_at"],
+        "code": ["uid"],
+        "-code": ["-uid"],
+        "district": ["district", "thana", "-created_at"],
+        "-district": ["-district", "-thana", "-created_at"],
+        "paid": ["-payment_verified", "-created_at"],
+        "unpaid": ["payment_verified", "-created_at"],
+        "courier": ["-courier_submitted", "-created_at"],
+        "no_courier": ["courier_submitted", "-created_at"],
+        "repeat": ["-is_repeat_customer", "-created_at"],
+    }
+    DEFAULT_SORT = "status"
 
     def get_queryset(self):
-        from django.db.models import Q
+        from django.db.models import Case, F, IntegerField, Q, Value, When
 
         qs = super().get_queryset()
         st = self.request.query_params.get("status")
@@ -570,7 +748,26 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
                 | Q(whatsapp__icontains=q)
                 | Q(email__icontains=q)
             )
-        return qs
+
+        sort = self.request.query_params.get("sort") or self.DEFAULT_SORT
+        if sort not in self.SORTS:
+            sort = self.DEFAULT_SORT
+
+        qs = qs.annotate(_total=F("subtotal") + F("delivery_charge"))
+
+        if sort in ("status", "-status"):
+            whens = [
+                When(status=s, then=Value(i))
+                for i, s in enumerate(self.STATUS_PRIORITY)
+            ]
+            qs = qs.annotate(
+                _rank=Case(*whens, default=Value(len(self.STATUS_PRIORITY)),
+                           output_field=IntegerField()),
+            )
+            rank = "_rank" if sort == "status" else "-_rank"
+            return qs.order_by(rank, "-created_at")
+
+        return qs.order_by(*self.SORTS[sort])
 
     def destroy(self, request, *args, **kwargs):
         order = self.get_object()
@@ -604,8 +801,53 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
             return Response({"error": "Invalid status"}, status=status.HTTP_400_BAD_REQUEST)
         order.status = new_status
         order.save(update_fields=["status", "updated_at"])
+        if new_status == Order.Status.CONFIRMED:
+            _fire_purchase(order)  # any move into confirmed reports the Purchase
         notifications.notify_order_status(order)
         return Response(self.get_serializer(order).data)
+
+    @action(detail=False, methods=["get"])
+    def catalogue(self, request):
+        """Everything sellable, light, for the manual-order item picker.
+
+        Deliberately not the catalog CRUD serializers — this only needs a name, a
+        price the shop actually charges, a thumbnail to recognise it by, and the
+        detail labels to prefill (so a listing asks for বরের নাম etc. exactly like
+        the storefront would). Plain Products are included even though the
+        storefront never sells them directly: on WhatsApp the owner does.
+        """
+        def abs_url(f):
+            if not f:
+                return None
+            return request.build_absolute_uri(f.url)
+
+        def first_image(obj):
+            # iter() over the prefetched cache — .first() would re-query per row.
+            row = next(iter(obj.images.all()), None)
+            return abs_url(row.image if row else None)
+
+        listings = []
+        for c in (PrebuiltCombo.objects.filter(active=True)
+                  .prefetch_related("images", "input_fields")):
+            listings.append({
+                "id": c.id, "name": c.name, "category": c.category,
+                "price": str(c.price),
+                "image": first_image(c),
+                "fields": [f.label for f in c.input_fields.all()],
+            })
+
+        products = []
+        for p in (Product.objects.filter(active=True)
+                  .prefetch_related("images", "input_fields")):
+            products.append({
+                "id": p.id, "name": p.name, "category": p.category, "kind": p.kind,
+                "price": str(_catalogue_price(None, p)),
+                "customizable": p.is_customizable,
+                "image": first_image(p),
+                "fields": [f.label for f in p.input_fields.all()],
+            })
+
+        return Response({"listings": listings, "products": products})
 
     @action(detail=True, methods=["post"])
     def edit(self, request, pk=None):
@@ -627,28 +869,16 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
             order.delivery_charge = dec(d.get("delivery_charge"))
         if "advance_received" in d:
             order.advance_received = dec(d.get("advance_received"))
-        if "cost_price" in d:
-            v = d.get("cost_price")
-            order.cost_price = dec(v) if v not in (None, "") else None
 
         # Replace line items only for fully manual (admin-entered) orders.
         items = d.get("items")
         existing = list(order.items.all())
         all_manual = bool(existing) and all((it.config or {}).get("manual") for it in existing)
         if items is not None and all_manual:
-            order.items.all().delete()
-            subtotal = Decimal("0")
-            for it in items:
-                title = str(it.get("title", "")).strip()
-                if not title:
-                    continue
-                price = dec(it.get("price"))
-                subtotal += price
-                CartItem.objects.create(
-                    order=order, session_key="admin",
-                    config={"title": title, "manual": True}, price_snapshot=price,
-                )
-            order.subtotal = subtotal
+            lines = _manual_lines(items)
+            if lines:
+                order.items.all().delete()
+                order.subtotal = _create_manual_items(order, lines)
 
         order.cod_amount = order.compute_cod()
         order.is_repeat_customer = (
@@ -656,6 +886,20 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
             if order.phone else False
         )
         order.save()
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def recheck_fraud(self, request, pk=None):
+        """Re-run the courier delivery-history (fraud) check for this order's phone
+        and store the fresh result. The detail page's 'Courier delivery history'
+        card renders from `fraud_check_result`."""
+        from .services.fraud_check import check_phone
+        order = self.get_object()
+        if not order.phone:
+            return Response({"error": "Order has no phone number"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        order.fraud_check_result = check_phone(order.phone)
+        order.save(update_fields=["fraud_check_result", "updated_at"])
         return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["post"])
@@ -673,6 +917,55 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         order.save(update_fields=["steadfast_status", "updated_at"])
         return Response(self.get_serializer(order).data)
 
+    # One press must not outlive the Passenger request, and each parcel is its own
+    # HTTP round-trip (COURIER.TIMEOUT_SECONDS each), so cap the batch. The
+    # response reports `remaining` — press again to continue.
+    SYNC_BATCH = 40
+
+    @action(detail=False, methods=["post"])
+    def sync_steadfast(self, request):
+        """Bulk-refresh Steadfast status for every SHIPPED, booked order and mark the
+        delivered ones `delivered`.
+
+        Deliberately limited to `status=shipped`: earlier states are the admin's
+        call (a parcel is not booked yet or is awaiting a phone confirm) and
+        `delivered`/`cancelled` are terminal. Per-order failures are collected, not
+        fatal — one dead parcel must not stop the sweep.
+        """
+        from .services.steadfast_order import SteadfastError
+
+        qs = (Order.objects
+              .filter(status=Order.Status.SHIPPED)
+              .exclude(steadfast_consignment_id="")
+              .prefetch_related("extra_consignments")
+              .order_by("created_at"))          # oldest first — most likely delivered
+        total = qs.count()
+        batch = list(qs[:self.SYNC_BATCH])
+
+        delivered, errors = [], []
+        for order in batch:
+            try:
+                became_delivered, _ = _sync_order_from_steadfast(order)
+            except SteadfastError as exc:
+                errors.append({"uid": order.uid, "error": str(exc)})
+                continue
+            except Exception as exc:          # never let one bad row kill the sweep
+                import logging
+                logging.getLogger(__name__).exception(
+                    "Steadfast sync failed for %s", order.uid)
+                errors.append({"uid": order.uid, "error": str(exc)})
+                continue
+            if became_delivered:
+                delivered.append(order.uid)
+
+        return Response({
+            "checked": len(batch),
+            "delivered": delivered,
+            "delivered_count": len(delivered),
+            "errors": errors,
+            "remaining": max(total - len(batch), 0),
+        })
+
     @action(detail=True, methods=["post"])
     def resubmit_steadfast(self, request, pk=None):
         """Re-book the consignment on Steadfast (after a failed/unknown submit).
@@ -681,7 +974,8 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         order = self.get_object()
         invoice = f"{order.uid}-{timezone.now().strftime('%H%M%S')}"
         try:
-            res = create_consignment(order, invoice=invoice)
+            res = create_consignment(order, invoice=invoice,
+                                     overrides=self._primary_overrides(order, request.data))
         except SteadfastError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         order.steadfast_consignment_id = res["consignment_id"]
@@ -736,6 +1030,75 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
             item_description=overrides.get("item_description", ""),
         )
         return Response(ExtraConsignmentSerializer(ec).data)
+
+    def _get_extra(self, order, request):
+        """Resolve the ExtraConsignment named by `extra_id` in the body, or None."""
+        return order.extra_consignments.filter(pk=request.data.get("extra_id")).first()
+
+    @staticmethod
+    def _primary_overrides(order, data):
+        """Recipient/COD/description edits for the PRIMARY consignment's Steadfast
+        payload (parity with book_extra). Blank/absent fields fall back to the
+        order-derived values inside create_consignment."""
+        overrides = {}
+        for f in ["recipient_name", "recipient_phone", "recipient_address", "item_description"]:
+            if data.get(f):
+                overrides[f] = data[f]
+        cod = data.get("cod_amount")
+        if cod not in (None, ""):
+            try:
+                overrides["cod_amount"] = Decimal(str(cod))
+            except Exception:
+                pass
+        if order.whatsapp:
+            overrides["alternative_phone"] = order.whatsapp
+        return overrides
+
+    @action(detail=True, methods=["post"])
+    def extra_status(self, request, pk=None):
+        """Refresh ONE additional consignment's Steadfast delivery status."""
+        from .services.steadfast_order import SteadfastError, get_status_by_cid
+        order = self.get_object()
+        ec = self._get_extra(order, request)
+        if not ec:
+            return Response({"error": "Consignment not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not ec.consignment_id:
+            return Response({"error": "Not booked yet"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            ec.status = get_status_by_cid(ec.consignment_id)
+        except SteadfastError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        ec.save(update_fields=["status"])
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def resubmit_extra(self, request, pk=None):
+        """Re-book ONE additional consignment on Steadfast (after a failed/unknown
+        submit), reusing its stored recipient/COD/description with a fresh invoice."""
+        order = self.get_object()
+        ec = self._get_extra(order, request)
+        if not ec:
+            return Response({"error": "Consignment not found"}, status=status.HTTP_404_NOT_FOUND)
+        invoice = f"{order.uid}-{timezone.now().strftime('%H%M%S')}"
+        overrides = {
+            "recipient_name": ec.recipient_name,
+            "recipient_phone": ec.recipient_phone,
+            "recipient_address": ec.recipient_address,
+            "item_description": ec.item_description,
+            "cod_amount": ec.cod_amount,
+        }
+        if order.whatsapp:
+            overrides["alternative_phone"] = order.whatsapp
+        try:
+            res = create_consignment(order, invoice=invoice, overrides=overrides)
+        except SteadfastError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        ec.invoice = invoice
+        ec.consignment_id = res["consignment_id"]
+        ec.tracking_code = res["tracking_code"]
+        ec.status = res["status"]
+        ec.save(update_fields=["invoice", "consignment_id", "tracking_code", "status"])
+        return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["post"])
     def edit_config(self, request, pk=None):
@@ -836,7 +1199,8 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         order.advance_received = advance
         order.cod_amount = order.compute_cod()
         try:
-            result = create_consignment(order)
+            result = create_consignment(order,
+                                        overrides=self._primary_overrides(order, request.data))
         except SteadfastError as exc:
             return Response({"error": f"Steadfast booking failed: {exc}"},
                             status=status.HTTP_502_BAD_GATEWAY)
@@ -847,6 +1211,7 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         order.courier_submitted = True
         order.status = Order.Status.CONFIRMED
         order.save()
+        _fire_purchase(order)
         notifications.notify_order_status(order)
         return Response(self.get_serializer(order).data)
 
@@ -959,18 +1324,189 @@ def admin_analytics(request):
 
 @api_view(["GET"])
 @permission_classes([IsAdminUser])
-def admin_dashboard(request):
+def admin_analytics_live(request):
+    """Visitors right now + a short live event feed. Polled every ~10s."""
+    from .models import AnalyticsEvent
+    from .services import analytics
+
+    data = analytics.presence()
+    recent = AnalyticsEvent.objects.select_related("combo", "product")[:15]
+    data["recent"] = [{
+        "name": e.name,
+        "path": e.path,
+        "ts": e.ts,
+        "label": (e.combo.name if e.combo_id else
+                  e.product.name if e.product_id else
+                  (e.props or {}).get("q", "")),
+    } for e in recent]
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
+def admin_analytics_overview(request):
+    """Dashboard payload: today live from raw tables, history from the rollups.
+
+    `?days=N` (default 7, max 90) sets the history window. Nothing here scans the
+    raw event table beyond today — that is the whole point of the rollups.
+    """
+    from datetime import timedelta
+
     from django.db.models import F, Sum
 
+    from .models import (
+        DailyComboStat, DailyFunnelStat, DailyPageStat, DailySourceStat, DailyStat,
+    )
+    from .services import analytics
+
+    try:
+        days = min(max(int(request.query_params.get("days", 7)), 1), 90)
+    except (TypeError, ValueError):
+        days = 7
+
+    today = timezone.localdate()
+    start = today - timedelta(days=days - 1)
+
+    # --- trend: rolled-up days + today computed live ------------------------ #
+    rolled = {s.date: s for s in DailyStat.objects.filter(date__gte=start, date__lte=today)}
+    live_today = analytics.today_totals(today)
+    trend = []
+    for i in range(days):
+        day = start + timedelta(days=i)
+        if day == today:
+            trend.append({
+                "date": day.isoformat(),
+                "visitors": live_today["visitors"],
+                "sessions": live_today["sessions"],
+                "pageviews": live_today["pageviews"],
+            })
+            continue
+        s = rolled.get(day)
+        trend.append({
+            "date": day.isoformat(),
+            "visitors": s.visitors if s else 0,
+            "sessions": s.sessions if s else 0,
+            "pageviews": s.pageviews if s else 0,
+        })
+
+    pages = list(
+        DailyPageStat.objects.filter(date__gte=start)
+        .values("path")
+        .annotate(views=Sum("views"), sessions=Sum("sessions"),
+                  entries=Sum("entries"), exits=Sum("exits"))
+        .order_by("-views")[:15]
+    )
+    _label_pages(pages)
+
+    combos = list(
+        DailyComboStat.objects.filter(date__gte=start)
+        .values("combo_id", name=F("combo__name"))
+        .annotate(views=Sum("views"), carts=Sum("carts"),
+                  orders=Sum("orders"), revenue=Sum("revenue"))
+        .order_by("-views")[:20]
+    )
+    for c in combos:
+        c["revenue"] = float(c["revenue"] or 0)
+        c["conversion"] = round((c["orders"] or 0) / c["views"] * 100, 1) if c["views"] else 0
+
+    sources = list(
+        DailySourceStat.objects.filter(date__gte=start)
+        .values("source")
+        .annotate(sessions=Sum("sessions"), orders=Sum("orders"))
+        .order_by("-sessions")[:10]
+    )
+
+    funnel_rows = {
+        r["step"]: r["n"] for r in
+        DailyFunnelStat.objects.filter(date__gte=start)
+        .values("step").annotate(n=Sum("sessions"))
+    }
+    funnel = [{"step": s, "sessions": funnel_rows.get(s, 0)} for s in DailyFunnelStat.STEPS]
+
+    return Response({
+        "days": days,
+        "today": live_today,
+        "live": analytics.presence(),
+        "trend": trend,
+        "top_pages": pages,
+        "top_combos": combos,
+        "sources": sources,
+        "funnel": funnel,
+        # Demand we aren't serving. Counted in Python off a single indexed event
+        # name — a JSON-key GROUP BY would tie this to one DB backend.
+        "empty_searches": _empty_searches(start),
+        "devices": _device_split(start),
+    })
+
+
+def _label_pages(rows):
+    """Name the catalogue paths in place, e.g. /combo/combo-7 -> the listing's name.
+
+    Bengali names slugify to empty, so combo slugs are auto-generated (combo-7) —
+    the raw path alone tells the owner nothing about WHICH listing was read.
+    Unresolvable paths (a deleted listing, or a collapsed :slug placeholder) just
+    keep no label.
+    """
+    from .models import GalleryTag
+
+    wanted = {"/combo/": {}, "/gallery/": {}}
+    for r in rows:
+        for prefix in wanted:
+            if r["path"].startswith(prefix) and not r["path"].endswith("/:slug"):
+                wanted[prefix][r["path"].split("/")[-1]] = r["path"]
+
+    names = {}
+    # PrebuiltCombo calls it `name`, GalleryTag calls it `title`.
+    for prefix, model, field in (("/combo/", PrebuiltCombo, "name"),
+                                 ("/gallery/", GalleryTag, "title")):
+        slugs = wanted[prefix]
+        if not slugs:
+            continue
+        for slug, name in model.objects.filter(slug__in=slugs).values_list("slug", field):
+            names[slugs[slug]] = name
+
+    for r in rows:
+        r["label"] = names.get(r["path"], "")
+
+
+def _empty_searches(start, limit=10):
+    """Top zero-result search terms since `start` (JSON prop, counted in Python —
+    a few hundred rows at most, and it keeps the query DB-agnostic)."""
+    from collections import Counter
+
+    from .models import AnalyticsEvent
+
+    terms = Counter()
+    rows = (AnalyticsEvent.objects
+            .filter(name="search_empty", ts__date__gte=start)
+            .values_list("props", flat=True)[:5000])
+    for props in rows:
+        q = str((props or {}).get("q", "")).strip()
+        if q:
+            terms[q[:60]] += 1
+    return [{"term": t, "count": n} for t, n in terms.most_common(limit)]
+
+
+def _device_split(start):
+    from django.db.models import Count as _Count
+
+    from .models import VisitorSession
+    return list(
+        VisitorSession.objects.filter(started_at__date__gte=start)
+        .values("device").annotate(sessions=_Count("id")).order_by("-sessions")
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
+def admin_dashboard(request):
     today = timezone.localdate()
     recent = Order.objects.all()[:10]
 
-    live = Order.objects.exclude(status=Order.Status.CANCELLED)
-    profit_agg = live.exclude(cost_price__isnull=True).aggregate(
-        p=Sum(F("subtotal") - F("cost_price"))
-    )
-    total_profit = float(profit_agg["p"] or 0)
-    uncosted_count = live.filter(cost_price__isnull=True).count()
+    # Money is business-wide now (Finance cash-book), not per order: this month's
+    # income minus spending. See app/finance_api.py.
+    from .finance_api import month_net
+    net = month_net(today)
 
     from .models import DailyStat
     stat = DailyStat.objects.filter(date=today).first()
@@ -984,8 +1520,10 @@ def admin_dashboard(request):
             status=CustomOrderRequest.Status.PENDING,
         ).count(),
         "total_orders": Order.objects.count(),
-        "total_profit": total_profit,
-        "uncosted_count": uncosted_count,
+        "month_income": net["income"],
+        "month_expense": net["expense"],
+        "month_net": net["net"],
+        "dues_total": net["dues"],
         "recent_orders": AdminOrderSerializer(
             recent, many=True, context={"request": request}
         ).data,

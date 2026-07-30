@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Hind_Siliguri, Noto_Serif_Bengali } from "next/font/google";
+import Analytics from "@/components/Analytics";
 import ChatWidget from "@/components/ChatWidget";
 import HelpNudge from "@/components/HelpNudge";
 import { StoreHeader, StoreBottom } from "@/components/shell/StoreChrome";
@@ -67,7 +68,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="bn" className={`${bengali.variable} ${display.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-background text-foreground">
+      {/* Grammarly and similar extensions inject attributes into <body> before
+          React hydrates, which React then reports as a mismatch. Nothing we
+          render differs between server and client here. */}
+      <body
+        suppressHydrationWarning
+        className="min-h-full flex flex-col bg-background text-foreground"
+      >
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationJsonLd()) }}
@@ -82,6 +89,7 @@ export default function RootLayout({
           <StoreBottom />
           <ChatWidget />
           <HelpNudge />
+          <Analytics />
         </ToastProvider>
       </body>
     </html>

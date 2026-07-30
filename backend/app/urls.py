@@ -3,7 +3,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import admin_api, views
+from . import admin_api, finance_api, views
 
 router = DefaultRouter()
 router.register(r"products", views.ProductViewSet, basename="product")
@@ -32,6 +32,15 @@ admin_router.register(r"custom-requests", admin_api.AdminCustomRequestViewSet, b
 admin_router.register(r"gallery-photos", admin_api.AdminGalleryPhotoViewSet, basename="admin-gallery-photo")
 admin_router.register(r"gallery-tags", admin_api.AdminGalleryTagViewSet, basename="admin-gallery-tag")
 admin_router.register(r"chats", admin_api.AdminChatSessionViewSet, basename="admin-chat")
+# Finance cash-book
+admin_router.register(r"finance-categories", finance_api.AdminFinanceCategoryViewSet,
+                      basename="admin-finance-category")
+admin_router.register(r"suppliers", finance_api.AdminSupplierViewSet, basename="admin-supplier")
+admin_router.register(r"expenses", finance_api.AdminExpenseViewSet, basename="admin-expense")
+admin_router.register(r"credit-payments", finance_api.AdminCreditPaymentViewSet,
+                      basename="admin-credit-payment")
+admin_router.register(r"incomes", finance_api.AdminIncomeViewSet, basename="admin-income")
+admin_router.register(r"buyers", finance_api.AdminBuyerViewSet, basename="admin-buyer")
 
 urlpatterns = [
     path("", include(router.urls)),
@@ -56,11 +65,18 @@ urlpatterns = [
     path("gallery/<slug:slug>/", views.gallery_detail, name="gallery-detail"),
     # Visitor tracking + nudge (public)
     path("nudge-event/", views.nudge_event, name="nudge-event"),
+    # Analytics beacon (public, batched, 204-always)
+    path("t/", views.track, name="track"),
+    # Steadfast pushes parcel status here (Bearer-token protected, not admin auth)
+    path("steadfast/webhook/", views.steadfast_webhook, name="steadfast-webhook"),
     # ---- Admin panel API ----
     path("admin/login/", admin_api.admin_login, name="admin-login"),
     path("admin/me/", admin_api.admin_me, name="admin-me"),
     path("admin/dashboard/", admin_api.admin_dashboard, name="admin-dashboard"),
     path("admin/analytics/", admin_api.admin_analytics, name="admin-analytics"),
+    path("admin/analytics/live/", admin_api.admin_analytics_live, name="admin-analytics-live"),
+    path("admin/analytics/overview/", admin_api.admin_analytics_overview,
+         name="admin-analytics-overview"),
     path("admin/chat-unread/", admin_api.admin_chat_unread, name="admin-chat-unread"),
     path("admin/push-key/", admin_api.admin_push_key, name="admin-push-key"),
     path("admin/push-subscribe/", admin_api.admin_push_subscribe, name="admin-push-subscribe"),
@@ -68,5 +84,12 @@ urlpatterns = [
     path("admin/orders/manual/", admin_api.admin_create_order, name="admin-order-manual"),
     path("admin/fraud-check/", admin_api.admin_fraud_check, name="admin-fraud-check"),
     path("admin/site-settings/", admin_api.admin_site_settings, name="admin-site-settings"),
+    path("admin/finance/summary/", finance_api.finance_summary, name="admin-finance-summary"),
+    path("admin/finance/meta/", finance_api.finance_meta, name="admin-finance-meta"),
+    path("admin/finance/ledger/", finance_api.finance_ledger, name="admin-finance-ledger"),
+    path("admin/finance/order-search/", finance_api.finance_order_search,
+         name="admin-finance-order-search"),
+    path("admin/finance/order/<int:pk>/", finance_api.order_finance,
+         name="admin-finance-order"),
     path("admin/", include(admin_router.urls)),
 ]

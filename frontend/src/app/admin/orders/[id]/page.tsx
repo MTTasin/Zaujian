@@ -7,10 +7,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   adminGet, adminPost, ORDER_STATUSES,
   listColorOptions, listToppingOptions, listInsideOptions, listStaticOptions, listDupattaOptions,
-  type AdminOrder, type AdminOrderItem, type ItemConfigField, type ItemConfigComboItem,
+  type AdminOrder, type AdminOrderItem, type ConsignmentEvent,
+  type ItemConfigField, type ItemConfigComboItem,
   type AdminProduct, type AdminColorOption, type AdminToppingOption,
   type AdminInsideOption, type AdminStaticOption, type AdminDupattaOption,
 } from "@/lib/adminApi";
+import { getOrderFinance } from "@/lib/financeApi";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
 import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, StatusPill, Loading } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
@@ -26,12 +28,22 @@ export default function AdminOrderDetail() {
   const [form, setForm] = useState({
     customer_name: "", phone: "", whatsapp: "", email: "",
     division: "", district: "", thana: "", address: "",
-    delivery_charge: "", advance_received: "", cost_price: "",
+    delivery_charge: "", advance_received: "",
   });
   const [thanaOther, setThanaOther] = useState("");
-  const [editItems, setEditItems] = useState<{ title: string; price: string }[]>([]);
+  const [editItems, setEditItems] = useState<{
+    title: string; price: string;
+    product: number | null; combo: number | null;
+    fields: ItemConfigField[]; note: string;
+  }[]>([]);
   const [extraOpen, setExtraOpen] = useState(false);
   const [extra, setExtra] = useState({
+    recipient_name: "", recipient_phone: "", recipient_address: "",
+    cod_amount: "", item_description: "",
+  });
+  // Optional recipient overrides for the PRIMARY consignment (Confirm + Re-submit).
+  const [primaryOpen, setPrimaryOpen] = useState(false);
+  const [primary, setPrimary] = useState({
     recipient_name: "", recipient_phone: "", recipient_address: "",
     cod_amount: "", item_description: "",
   });
@@ -54,14 +66,21 @@ export default function AdminOrderDetail() {
       division: order.division || "", district: order.district || "",
       thana: isListed ? stored : "Others", address: order.address || "",
       delivery_charge: order.delivery_charge || "", advance_received: order.advance_received || "",
-      cost_price: order.cost_price || "",
     });
+    // This form only edits the title and price, but `edit/` REPLACES the lines —
+    // so the link to the listing/product and the details typed off the WhatsApp
+    // chat ride along untouched instead of being wiped. (Those details have their
+    // own editor: "Edit customer answers" per item.)
     setEditItems(
       order.items
         .filter((it) => (it.config as { manual?: boolean })?.manual)
         .map((it) => ({
           title: String((it.config as { title?: string })?.title ?? it.product_name),
           price: it.price_snapshot,
+          product: it.product,
+          combo: it.combo,
+          fields: it.config?.fields ?? [],
+          note: it.config?.note ?? "",
         })),
     );
     setMsg(""); setError(""); setEditing(true);
@@ -261,6 +280,29 @@ export default function AdminOrderDetail() {
     setError(""); setMsg(""); setExtraOpen(true);
   }
 
+  function startPrimaryEdit() {
+    if (!order) return;
+    setPrimary({
+      recipient_name: order.customer_name || "",
+      recipient_phone: order.phone || "",
+      recipient_address: order.full_address || order.address || "",
+      cod_amount: order.cod_amount || "",
+      item_description: order.items.map((it) => it.product_name).filter(Boolean).join(", "),
+    });
+    setError(""); setMsg(""); setPrimaryOpen(true);
+  }
+
+  // Only send edited (non-empty) override fields; blanks fall back to order values.
+  function primaryOverrides() {
+    if (!primaryOpen) return {};
+    const o: Record<string, string> = {};
+    for (const k of ["recipient_name", "recipient_phone", "recipient_address",
+      "cod_amount", "item_description"] as const) {
+      if (primary[k]) o[k] = primary[k];
+    }
+    return o;
+  }
+
   async function bookExtra() {
     if (!order) return;
     setBusy(true); setError(""); setMsg("");
@@ -343,16 +385,13 @@ export default function AdminOrderDetail() {
             <div className="mt-4 grid gap-4 md:grid-cols-2">
               <Field label="Delivery charge (৳)"><TextInput type="number" step="0.01" value={form.delivery_charge} onChange={(e) => setForm((f) => ({ ...f, delivery_charge: e.target.value }))} /></Field>
               <Field label="Advance received (৳)"><TextInput type="number" step="0.01" value={form.advance_received} onChange={(e) => setForm((f) => ({ ...f, advance_received: e.target.value }))} /></Field>
-              <Field label="Cost price (৳) — your total cost">
-                <TextInput type="number" step="0.01" min="0" placeholder="Not costed yet" value={form.cost_price} onChange={(e) => setForm((f) => ({ ...f, cost_price: e.target.value }))} />
-              </Field>
             </div>
 
             {isManual && (
               <div className="mt-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-sm font-semibold text-slate-700">Items</span>
-                  <AdminButton type="button" variant="secondary" icon="plus" onClick={() => setEditItems((a) => [...a, { title: "", price: "" }])}>Add item</AdminButton>
+                  <AdminButton type="button" variant="secondary" icon="plus" onClick={() => setEditItems((a) => [...a, { title: "", price: "", product: null, combo: null, fields: [], note: "" }])}>Add item</AdminButton>
                 </div>
                 <div className="space-y-2">
                   {editItems.map((it, i) => (
@@ -388,14 +427,11 @@ export default function AdminOrderDetail() {
               <Row k="Advance required" v={order.advance_required ? "Yes" : "No"} />
               <Row k="Advance received" v={`৳ ${order.advance_received}`} />
               <Row k="COD amount" v={`৳ ${order.cod_amount}`} />
-              {order.cost_price != null ? (
-                <Row k="Profit (subtotal − cost)" v={`৳ ${order.profit}`} />
-              ) : (
-                <p className="mt-1 text-sm text-slate-400">Not costed yet</p>
-              )}
             </Panel>
           </div>
         )}
+
+        <OrderFinanceMarks orderId={order.id} />
 
         <Panel title="Items">
           <div className="space-y-3">
@@ -582,9 +618,66 @@ export default function AdminOrderDetail() {
 
         <Panel title="Courier delivery history">
           <FraudSummary data={order.fraud_check_result} />
+          <div className="mt-3">
+            <AdminButton
+              variant="secondary"
+              icon="truck"
+              disabled={busy}
+              onClick={() => act(() => adminPost(`orders/${order.id}/recheck_fraud/`), "Courier delivery history rechecked")}
+            >
+              Recheck delivery history
+            </AdminButton>
+          </div>
         </Panel>
 
         <Panel title="Steadfast consignment">
+          {/* Optional recipient/COD/description overrides applied to Confirm + Re-submit. */}
+          <div className="mb-3">
+            {!primaryOpen ? (
+              <button
+                type="button"
+                onClick={startPrimaryEdit}
+                className="text-sm font-medium text-plum hover:underline"
+              >
+                Edit recipient details
+              </button>
+            ) : (
+              <div className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                <p className="text-xs text-slate-500">
+                  Overrides for this consignment&apos;s Steadfast slip. Blank fields keep the order&apos;s values.
+                </p>
+                <Field label="Recipient name">
+                  <TextInput value={primary.recipient_name}
+                    onChange={(e) => setPrimary((f) => ({ ...f, recipient_name: e.target.value }))} />
+                </Field>
+                <Field label="Phone">
+                  <TextInput value={primary.recipient_phone}
+                    onChange={(e) => setPrimary((f) => ({ ...f, recipient_phone: e.target.value }))} />
+                </Field>
+                <Field label="Address">
+                  <TextArea value={primary.recipient_address}
+                    onChange={(e) => setPrimary((f) => ({ ...f, recipient_address: e.target.value }))} />
+                </Field>
+                <Field label="COD amount (৳)">
+                  <TextInput type="number" step="0.01" min="0" value={primary.cod_amount}
+                    onChange={(e) => setPrimary((f) => ({ ...f, cod_amount: e.target.value }))} />
+                </Field>
+                <Field label="Item description">
+                  <TextInput value={primary.item_description}
+                    onChange={(e) => setPrimary((f) => ({ ...f, item_description: e.target.value }))} />
+                </Field>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setPrimaryOpen(false)}
+                    className="text-sm text-slate-500 hover:underline"
+                  >
+                    Cancel overrides
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
           {order.courier_submitted ? (
             <>
               <Row k="Consignment" v={order.steadfast_consignment_id} />
@@ -631,7 +724,7 @@ export default function AdminOrderDetail() {
                       title={valid ? "Consignment is valid — re-submit only if it failed" : undefined}
                       onClick={() => {
                         if (confirm("Re-submit creates a NEW Steadfast consignment (new parcel ID). Use only if the previous booking failed or shows an error. Continue?")) {
-                          act(() => adminPost(`orders/${order.id}/resubmit_steadfast/`), "Re-submitted to Steadfast");
+                          act(() => adminPost(`orders/${order.id}/resubmit_steadfast/`, primaryOverrides()), "Re-submitted to Steadfast");
                         }
                       }}
                     >
@@ -640,6 +733,7 @@ export default function AdminOrderDetail() {
                   );
                 })()}
               </div>
+              <Timeline events={order.consignment_events} />
             </>
           ) : (
             <div className="space-y-3">
@@ -651,7 +745,7 @@ export default function AdminOrderDetail() {
               <AdminButton
                 disabled={busy}
                 icon="truck"
-                onClick={() => act(() => adminPost(`orders/${order.id}/confirm/`, { advance_received: advance }), "Confirmed + booked to Steadfast")}
+                onClick={() => act(() => adminPost(`orders/${order.id}/confirm/`, { advance_received: advance, ...primaryOverrides() }), "Confirmed + booked to Steadfast")}
               >
                 Confirm order + book Steadfast
               </AdminButton>
@@ -672,15 +766,63 @@ export default function AdminOrderDetail() {
           {order.extra_consignments.length === 0 && (
             <p className="text-sm text-slate-400">No additional consignments.</p>
           )}
-          {order.extra_consignments.map((ec) => (
-            <div key={ec.id} className="flex flex-wrap gap-x-6 gap-y-1 border-t border-slate-100 py-2 text-sm">
-              <span>Invoice: {ec.invoice}</span>
-              <span>CID: {ec.consignment_id || "—"}</span>
-              <span>Track: {ec.tracking_code || "—"}</span>
-              <span>Status: {ec.status || "—"}</span>
-              <span>COD: ৳{ec.cod_amount}</span>
-            </div>
-          ))}
+          {order.extra_consignments.map((ec) => {
+            const st = (ec.status || "").toLowerCase();
+            const bookedValid = st !== "" && st !== "unknown";
+            return (
+              <div key={ec.id} className="border-t border-slate-100 py-2 text-sm">
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  <span>Invoice: {ec.invoice}</span>
+                  <span>CID: {ec.consignment_id || "—"}</span>
+                  <span>Track: {ec.tracking_code || "—"}</span>
+                  <span>Status: {ec.status || "—"}</span>
+                  <span>COD: ৳{ec.cod_amount}</span>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {ec.tracking_code && (
+                    <AdminButton
+                      variant="secondary" icon="copy" disabled={busy}
+                      className="min-h-8 px-3 text-xs"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(ec.tracking_code);
+                          setMsg("Tracking code copied — paste it in Steadfast → Tracking Parcel");
+                        } catch { /* clipboard unavailable */ }
+                      }}
+                    >
+                      Copy tracking
+                    </AdminButton>
+                  )}
+                  <Link
+                    href={`/admin/orders/${order.id}/challan?extra=${ec.id}`}
+                    className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    <Icon name="upload" size={14} /> Print challan
+                  </Link>
+                  <AdminButton
+                    variant="secondary" icon="truck" disabled={busy}
+                    className="min-h-8 px-3 text-xs"
+                    onClick={() => act(() => adminPost(`orders/${order.id}/extra_status/`, { extra_id: ec.id }), "Status refreshed")}
+                  >
+                    Refresh status
+                  </AdminButton>
+                  <AdminButton
+                    variant="danger" icon="truck" disabled={busy || bookedValid}
+                    title={bookedValid ? "Consignment is valid — re-submit only if it failed" : undefined}
+                    className="min-h-8 px-3 text-xs"
+                    onClick={() => {
+                      if (confirm("Re-submit re-books this consignment on Steadfast with a NEW parcel ID. Use only if it failed. Continue?")) {
+                        act(() => adminPost(`orders/${order.id}/resubmit_extra/`, { extra_id: ec.id }), "Re-submitted to Steadfast");
+                      }
+                    }}
+                  >
+                    Re-submit
+                  </AdminButton>
+                </div>
+                <Timeline events={ec.events} />
+              </div>
+            );
+          })}
 
           {extraOpen && (
             <div className="mt-3 grid gap-3 border-t border-slate-100 pt-3">
@@ -739,12 +881,93 @@ export default function AdminOrderDetail() {
   );
 }
 
+/**
+ * A parcel's tracking history, newest first — only ever filled by Steadfast's
+ * webhook (their API can be polled for a single status string and nothing else),
+ * so it stays hidden until the first push arrives.
+ */
+function Timeline({ events }: { events: ConsignmentEvent[] }) {
+  const [open, setOpen] = useState(false);
+  if (!events?.length) return null;
+  const shown = open ? events : events.slice(0, 4);
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-3">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        Tracking history
+      </p>
+      <ol className="space-y-2">
+        {shown.map((e) => (
+          <li key={e.id} className="flex gap-2 text-xs">
+            <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+              e.notification_type === "delivery_status" ? "bg-plum" : "bg-slate-300"
+            }`} />
+            <span className="min-w-0">
+              <span className="block text-slate-700">
+                {e.tracking_message || e.status || "—"}
+              </span>
+              <span className="block text-slate-400">
+                {e.event_time || new Date(e.received_at).toLocaleString()}
+                {e.status ? ` · ${e.status}` : ""}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {events.length > 4 && (
+        <button type="button" onClick={() => setOpen((v) => !v)}
+                className="mt-2 text-xs font-medium text-plum hover:underline">
+          {open ? "Show less" : `Show all ${events.length}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <Card className="p-4">
       <h2 className="mb-2 font-semibold text-slate-900">{title}</h2>
       {children}
     </Card>
+  );
+}
+
+// Finance entries MARKED against this order. A mark is a note about what money
+// was for — nothing is allocated to the order, so there is no per-order profit.
+function OrderFinanceMarks({ orderId }: { orderId: number }) {
+  const [data, setData] = useState<Awaited<ReturnType<typeof getOrderFinance>> | null>(null);
+
+  useEffect(() => {
+    getOrderFinance(orderId).then(setData).catch(() => {});
+  }, [orderId]);
+
+  if (!data || (!data.expenses.length && !data.incomes.length)) return null;
+
+  return (
+    <Panel title="Money marked against this order">
+      <p className="mb-2 text-xs text-slate-400">
+        A reference only — these amounts are not costed against the order.
+      </p>
+      <div className="space-y-1">
+        {data.expenses.map((e) => (
+          <div key={`e${e.id}`} className="flex justify-between gap-4 text-sm">
+            <span className="text-slate-500">{e.date} · {e.category_name}{e.description ? ` — ${e.description}` : ""}</span>
+            <span className="whitespace-nowrap text-red-600">− ৳ {e.total_out}</span>
+          </div>
+        ))}
+        {data.incomes.map((i) => (
+          <div key={`i${i.id}`} className="flex justify-between gap-4 text-sm">
+            <span className="text-slate-500">{i.date} · {i.category_name}{i.description ? ` — ${i.description}` : ""}</span>
+            <span className="whitespace-nowrap text-emerald-600">+ ৳ {i.net_amount}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 border-t border-slate-100 pt-2 text-sm">
+        <Link href="/admin/finance" className="font-semibold text-plum hover:underline">
+          Open Finance →
+        </Link>
+      </div>
+    </Panel>
   );
 }
 

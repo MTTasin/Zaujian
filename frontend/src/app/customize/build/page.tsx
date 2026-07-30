@@ -6,6 +6,7 @@ import ConfiguratorSwitch, { type PresetConfig } from "@/components/configurator
 import { Container } from "@/components/ui/Container";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { getProduct, type ProductDetail } from "@/lib/api";
+import { trackWizardAbandon, trackWizardStep } from "@/lib/analytics";
 
 // Sequential wizard: customize each selected product, confirm -> next -> cart.
 export default function WizardBuild() {
@@ -41,6 +42,23 @@ export default function WizardBuild() {
     if (!slug) return;
     setProduct(null);
     getProduct(slug).then(setProduct).catch(() => setError("পণ্য লোড করা যায়নি"));
+  }, [slugs, index]);
+
+  // Which step they reached, and — the useful half — which step they quit on.
+  // Drop-off per step is what tells us a configurator screen is confusing.
+  useEffect(() => {
+    if (!product) return;
+    trackWizardStep(index + 1, product.name);
+  }, [product, index]);
+
+  useEffect(() => {
+    if (slugs.length === 0) return;
+    const onLeave = () => {
+      // Finishing clears wizard_slugs, so anything still stored means they left mid-way.
+      if (sessionStorage.getItem("wizard_slugs")) trackWizardAbandon(index + 1);
+    };
+    window.addEventListener("pagehide", onLeave);
+    return () => window.removeEventListener("pagehide", onLeave);
   }, [slugs, index]);
 
   const goBack = useCallback(() => {

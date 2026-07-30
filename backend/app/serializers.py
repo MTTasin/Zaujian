@@ -469,12 +469,17 @@ class CartItemSerializer(serializers.ModelSerializer):
         return _config_display(obj, self.context.get("request"))
 
     def get_product_name(self, obj):
+        # An admin-entered line carries its own label, and it wins even when the
+        # line is linked to a listing/product — the owner may have written what
+        # the customer actually asked for on WhatsApp. Website lines never set it.
+        title = (obj.config or {}).get("title", "")
+        if title:
+            return title
         if obj.product:
             return obj.product.name
         if obj.combo:
             return obj.combo.name
-        # Manual/admin-entered line carries its label in config.
-        return (obj.config or {}).get("title", "")
+        return ""
 
     def get_product_slug(self, obj):
         if obj.product:

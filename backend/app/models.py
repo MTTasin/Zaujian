@@ -440,6 +440,11 @@ class CustomOrderReferenceImage(models.Model):
 
 class Order(models.Model):
     class Status(models.TextChoices):
+        # New website orders land here — an admin phones the customer, then
+        # Confirm (fires the Meta Purchase) or Cancel. Nothing auto-confirms, so
+        # a declined order never reaches Meta. advance_required just marks the
+        # ones that must pay first; it is no longer its own status.
+        IN_REVIEW = "in_review", "In review"
         PENDING_PAYMENT = "pending_payment", "Pending payment"
         CONFIRMED = "confirmed", "Confirmed"
         IN_PRODUCTION = "in_production", "In production"
@@ -473,10 +478,9 @@ class Order(models.Model):
     advance_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
     advance_received = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
     cod_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
-    cost_price = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True,
-        help_text="Total cost to fulfil this order. Blank = not costed yet.",
-    )
+    # No per-order costing: money is tracked business-wide in the Finance
+    # cash-book (Expense/Income). Expenses may be *marked* against an order for
+    # reference, but nothing is allocated back to it.
 
     # Manual payment
     payment_method = models.CharField(
@@ -488,6 +492,16 @@ class Order(models.Model):
 
     # Fraud check (raw response stored for the record)
     fraud_check_result = models.JSONField(default=dict, blank=True)
+
+    # Meta attribution captured at checkout, REPLAYED when the order is confirmed.
+    # For COD we delay the Purchase to manual confirm (cancelled reviews never
+    # reach Meta); storing fbp/fbc/ip/ua here keeps match quality high even though
+    # the event fires later, server-side. See app/services/capi.fire_order_purchase.
+    meta_fbp = models.CharField(max_length=128, blank=True)
+    meta_fbc = models.CharField(max_length=255, blank=True)
+    meta_source_url = models.CharField(max_length=500, blank=True)
+    meta_client_ip = models.CharField(max_length=45, blank=True)
+    meta_user_agent = models.TextField(blank=True)
 
     # Steadfast consignment (booked only on admin confirm)
     steadfast_consignment_id = models.CharField(max_length=64, blank=True)
@@ -532,13 +546,6 @@ class Order(models.Model):
         parts = [self.address, self.thana, self.district, self.division]
         return ", ".join(p for p in parts if p)
 
-    @property
-    def profit(self):
-        """Subtotal minus cost. None until a cost has been entered."""
-        if self.cost_price is None:
-            return None
-        return self.subtotal - self.cost_price
-
     def compute_cod(self):
         """COD = subtotal + delivery - advance received. Never negative."""
         cod = self.total - self.advance_received
@@ -567,6 +574,57 @@ class ExtraConsignment(models.Model):
 
     def __str__(self):
         return f"Extra consignment {self.invoice} for order {self.order_id}"
+
+
+class ConsignmentEvent(models.Model):
+    """One push from Steadfast's webhook — a status change or a tracking message.
+
+    Their API can only be POLLED for a single status string, so the timeline the
+    merchant panel shows ("received at AMBARKHANA", "assigned to rider") exists
+    nowhere we can fetch: it only arrives here, once, as it happens. Hence the
+    table — append-only history per parcel, never a source of truth for money or
+    order state (the webhook writes those onto Order/ExtraConsignment as usual).
+    A parcel can be the order's primary consignment (`extra` blank) or one of the
+    additional ones.
+    """
+
+    class Kind(models.TextChoices):
+        DELIVERY_STATUS = "delivery_status", "Delivery status update"
+        TRACKING_UPDATE = "tracking_update", "Tracking update"
+
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name="consignment_events",
+        null=True, blank=True,
+        help_text="Blank only if the consignment id matched nothing we booked",
+    )
+    extra = models.ForeignKey(
+        ExtraConsignment, on_delete=models.CASCADE, related_name="events",
+        null=True, blank=True,
+        help_text="Set when the parcel is an additional consignment, not the primary",
+    )
+    consignment_id = models.CharField(max_length=64, db_index=True)
+    invoice = models.CharField(max_length=64, blank=True)
+    notification_type = models.CharField(max_length=32)
+    # Their delivery_status values: pending / delivered / partial_delivered /
+    # cancelled / unknown. Stored lower-cased so it compares with the polled one.
+    status = models.CharField(max_length=32, blank=True)
+    tracking_message = models.TextField(blank=True)
+    cod_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # What Steadfast actually charged for this parcel. Not used in the cash-book
+    # (a payout is entered net, see the Finance section) — it is just visible.
+    delivery_charge = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # Their timestamp string, kept verbatim: no timezone is documented, so parsing
+    # it into a datetime would be inventing one.
+    event_time = models.CharField(max_length=40, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-received_at", "-id"]
+        indexes = [models.Index(fields=["consignment_id", "received_at"])]
+
+    def __str__(self):
+        return f"{self.notification_type} for consignment {self.consignment_id}"
 
 
 # --------------------------------------------------------------------------- #
@@ -867,14 +925,458 @@ class PushSubscription(models.Model):
 # --------------------------------------------------------------------------- #
 
 class DailyStat(models.Model):
-    """One row per day of lightweight storefront counters (no per-visitor rows)."""
+    """One row per day of lightweight storefront counters (no per-visitor rows).
+
+    `visitors`/`popups_*` are bumped live by the nudge endpoint; the analytics
+    fields below are (re)written by the nightly `rollup_analytics` command.
+    """
     date = models.DateField(unique=True)
     visitors = models.PositiveIntegerField(default=0)
     popups_shown = models.PositiveIntegerField(default=0)
     popups_clicked = models.PositiveIntegerField(default=0)
+    # Rolled up from VisitorSession.
+    sessions = models.PositiveIntegerField(default=0)
+    pageviews = models.PositiveIntegerField(default=0)
+    new_visitors = models.PositiveIntegerField(default=0)
+    bounced_sessions = models.PositiveIntegerField(default=0)
+    total_seconds = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["-date"]
 
     def __str__(self):
         return f"Stats {self.date}: {self.visitors} visitors"
+
+    @property
+    def bounce_rate(self):
+        return (self.bounced_sessions / self.sessions * 100) if self.sessions else 0
+
+    @property
+    def avg_seconds(self):
+        return (self.total_seconds / self.sessions) if self.sessions else 0
+
+
+# --------------------------------------------------------------------------- #
+# Analytics  (self-hosted, cookie-free)
+#
+# Three layers, so the DB never grows without bound:
+#   1. AnalyticsEvent  — raw rows, purged after ANALYTICS_RETENTION_DAYS.
+#   2. VisitorSession  — one row per session; also powers "visitors right now"
+#      (a heartbeat only touches `last_seen`, so presence costs no new rows).
+#   3. Daily*Stat       — nightly rollups, kept forever, what the dashboard reads
+#      for anything older than today.
+# No queue exists here, so rollups run from cron, never in the request path.
+# --------------------------------------------------------------------------- #
+
+class AnalyticsEvent(models.Model):
+    """One raw storefront interaction. Written in batches by /api/t/."""
+
+    # Server-side whitelist — the collector drops anything not in here, so a
+    # hostile client can never invent event names or bloat the table.
+    NAMES = frozenset({
+        "pageview",         # every route change
+        "view_combo",       # opened a listing
+        "view_product",     # opened a customizable product
+        "add_to_cart",
+        "begin_checkout",
+        "purchase",
+        "search",           # ?q= submitted
+        "search_empty",     # ...that returned nothing (what we don't sell)
+        "wizard_step",      # reached a configurator step
+        "wizard_abandon",   # left the wizard without finishing
+        "chat_open",
+        "nudge_shown",
+        "nudge_clicked",
+        "scroll",           # depth milestone (props: {"d": 25|50|75|100})
+        "click",            # element with data-track
+    })
+    # Accepted by the collector but stored on the session only (no row): the
+    # presence heartbeat. Storing it would multiply the table for zero insight.
+    SESSION_ONLY = frozenset({"ping"})
+
+    ts = models.DateTimeField(default=timezone.now, db_index=True)
+    session_id = models.CharField(max_length=32, db_index=True)
+    visitor_id = models.CharField(max_length=32, db_index=True)
+    name = models.CharField(max_length=32)
+    path = models.CharField(max_length=200, blank=True)
+    # Nullable FKs so a deleted listing never deletes history.
+    combo = models.ForeignKey(
+        "PrebuiltCombo", null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    product = models.ForeignKey(
+        "Product", null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    value = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    props = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-ts"]
+        indexes = [
+            models.Index(fields=["name", "ts"]),
+            models.Index(fields=["combo", "ts"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name} {self.path} @ {self.ts:%Y-%m-%d %H:%M}"
+
+
+class VisitorSession(models.Model):
+    """One row per browsing session. `last_seen` is what "visitors right now" reads."""
+
+    session_id = models.CharField(max_length=32, unique=True)
+    visitor_id = models.CharField(max_length=32, db_index=True)
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    last_seen = models.DateTimeField(default=timezone.now, db_index=True)
+    current_path = models.CharField(max_length=200, blank=True)
+    entry_path = models.CharField(max_length=200, blank=True)
+    exit_path = models.CharField(max_length=200, blank=True)
+    pageviews = models.PositiveIntegerField(default=0)
+    events = models.PositiveIntegerField(default=0)
+    # Derived server-side from the referrer / fbclid / utm_source — never trusted
+    # from the client, never stores the raw URL.
+    source = models.CharField(max_length=40, blank=True)
+    device = models.CharField(max_length=10, blank=True)   # mobile / tablet / desktop
+    is_new_visitor = models.BooleanField(default=True)
+    converted = models.BooleanField(default=False)         # reached purchase
+
+    class Meta:
+        ordering = ["-last_seen"]
+
+    def __str__(self):
+        return f"Session {self.session_id[:8]} ({self.pageviews} pages)"
+
+    @property
+    def seconds(self):
+        return max(int((self.last_seen - self.started_at).total_seconds()), 0)
+
+
+class DailyPageStat(models.Model):
+    """Per-path rollup: what people actually read."""
+    date = models.DateField(db_index=True)
+    path = models.CharField(max_length=200)
+    views = models.PositiveIntegerField(default=0)
+    sessions = models.PositiveIntegerField(default=0)   # unique sessions that saw it
+    entries = models.PositiveIntegerField(default=0)    # sessions that STARTED here
+    exits = models.PositiveIntegerField(default=0)      # ...and that ENDED here
+
+    class Meta:
+        ordering = ["-date", "-views"]
+        unique_together = [("date", "path")]
+
+    def __str__(self):
+        return f"{self.date} {self.path}: {self.views}"
+
+
+class DailyComboStat(models.Model):
+    """Per-listing funnel — the "which products do they like" table.
+
+    Views come from events; orders/revenue are joined from real Orders, so the
+    conversion column is trustworthy rather than client-reported.
+    """
+    date = models.DateField(db_index=True)
+    combo = models.ForeignKey("PrebuiltCombo", on_delete=models.CASCADE, related_name="daily_stats")
+    views = models.PositiveIntegerField(default=0)
+    carts = models.PositiveIntegerField(default=0)
+    orders = models.PositiveIntegerField(default=0)
+    revenue = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+
+    class Meta:
+        ordering = ["-date", "-views"]
+        unique_together = [("date", "combo")]
+
+    def __str__(self):
+        return f"{self.date} {self.combo_id}: {self.views} views / {self.orders} orders"
+
+
+class DailySourceStat(models.Model):
+    """Where the traffic came from, and whether it bought."""
+    date = models.DateField(db_index=True)
+    source = models.CharField(max_length=40)
+    sessions = models.PositiveIntegerField(default=0)
+    orders = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date", "-sessions"]
+        unique_together = [("date", "source")]
+
+    def __str__(self):
+        return f"{self.date} {self.source}: {self.sessions}"
+
+
+class DailyFunnelStat(models.Model):
+    """Sessions reaching each funnel step on a day (view → cart → checkout → order)."""
+
+    STEPS = ["view_combo", "add_to_cart", "begin_checkout", "purchase"]
+
+    date = models.DateField(db_index=True)
+    step = models.CharField(max_length=32)
+    sessions = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date"]
+        unique_together = [("date", "step")]
+
+    def __str__(self):
+        return f"{self.date} {self.step}: {self.sessions}"
+
+
+# --------------------------------------------------------------------------- #
+# Finance (cash-book)
+# --------------------------------------------------------------------------- #
+#
+# Cash basis: income is recorded when the money is actually in hand (mostly
+# Steadfast payouts, but any other source too), spending when it is committed.
+# There is NO per-order costing — linking an Expense/Income to orders is a MARK
+# ONLY ("this is what that money was for"); it never splits, allocates or feeds
+# any total. Steadfast already nets out the delivery charge and its 1% COD fee
+# before paying, so the payout figure the admin types in IS the income and is
+# never recomputed here.
+# See docs/superpowers/specs/2026-07-27-finance-cashbook-design.md.
+
+
+class FinanceAccount(models.TextChoices):
+    """Where the money moved. Not a ledger — just a label for reconciling.
+
+    MFS accounts (bKash/Nagad) charge a percentage to move money; that charge is
+    stored per entry in `fee_amount`, auto-filled from settings.FINANCE_FEE_RATES
+    but always editable — the real rate depends on cash-out vs send-money.
+    """
+    CASH = "cash", "Cash"
+    BANK = "bank", "Bank"
+    BKASH = "bkash", "bKash"
+    NAGAD = "nagad", "Nagad"
+    CARD = "card", "Card"
+    OTHER = "other", "Other"
+
+
+class FinanceCategory(models.Model):
+    """One table for both sides; `kind` keeps them apart. Admin-managed."""
+
+    class Kind(models.TextChoices):
+        INCOME = "income", "Income"
+        EXPENSE = "expense", "Expense"
+
+    name = models.CharField(max_length=60)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    order = models.PositiveSmallIntegerField(default=0)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["kind", "order", "name"]
+        unique_together = [("name", "kind")]
+        verbose_name_plural = "Finance categories"
+
+    def __str__(self):
+        return f"{self.name} ({self.get_kind_display()})"
+
+
+class Supplier(models.Model):
+    """Someone goods are bought FROM — purchases go on credit (money owed BY us)."""
+
+    name = models.CharField(max_length=120)
+    phone = models.CharField(max_length=20, blank=True)
+    note = models.TextField(blank=True)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Buyer(models.Model):
+    """Someone who buys FROM us on credit — a reseller, a shop, a bulk customer.
+
+    Deliberately separate from Supplier (owner's call): the two directions never
+    get confused, at the cost of entering a person twice if they are both.
+    Website customers are NOT buyers — a normal COD order settles through the
+    order itself; this is for goods handed over against a later payment.
+    """
+
+    name = models.CharField(max_length=120)
+    phone = models.CharField(max_length=20, blank=True)
+    note = models.TextField(blank=True)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Expense(models.Model):
+    """Money out. `amount` = what the purchase cost, VAT included.
+
+    `fee_amount` is the bKash/Nagad/bank charge paid ON TOP to move that money,
+    kept separate so a transfer fee never hides inside a price. Total cash out
+    for this row is `amount + fee_amount`.
+    """
+
+    date = models.DateField(default=timezone.localdate, db_index=True)
+    category = models.ForeignKey(
+        FinanceCategory, on_delete=models.PROTECT, related_name="expenses",
+        limit_choices_to={"kind": FinanceCategory.Kind.EXPENSE},
+    )
+    description = models.CharField(max_length=200, blank=True)
+    amount = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        help_text="Total money out, VAT included — what actually left the account.",
+    )
+    # Breakdown only. Already part of `amount`; never added on top of it.
+    vat_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        help_text="VAT portion already included in the amount (ads = 15% in BD).",
+    )
+    # Charged ON TOP of `amount` (bKash/Nagad cash-out or send-money fee, bank
+    # transfer charge). Auto-filled from the account's rate, always editable.
+    fee_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        help_text="MFS/transfer charge paid on top of the amount.",
+    )
+    account = models.CharField(
+        max_length=10, choices=FinanceAccount.choices, default=FinanceAccount.CASH,
+    )
+    supplier = models.ForeignKey(
+        Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="expenses",
+    )
+    is_credit = models.BooleanField(
+        default=False, help_text="Taken on credit — pay later, tracked in Dues.",
+    )
+    reference = models.CharField(max_length=80, blank=True, help_text="Invoice / trx id")
+    receipt = models.ImageField(upload_to="finance/", null=True, blank=True)
+    # A MARK, not an allocation: which orders this money was spent on. Zero
+    # effect on any total — see the module note above.
+    orders = models.ManyToManyField(
+        "Order", blank=True, related_name="expense_marks",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.date} {self.description or self.category_id}: {self.amount}"
+
+    @property
+    def total_out(self):
+        """Full cost of this row: the purchase plus the charge to move the money."""
+        return self.amount + self.fee_amount
+
+
+class Income(models.Model):
+    """Money in — a Steadfast payout, a sale, or anything else.
+
+    `is_credit` = sold on credit: goods are gone but the money has not arrived.
+    Cash basis, so such a row contributes NOTHING to income until an
+    IncomePayment lands; the outstanding part is a receivable instead.
+    """
+
+    date = models.DateField(default=timezone.localdate, db_index=True)
+    category = models.ForeignKey(
+        FinanceCategory, on_delete=models.PROTECT, related_name="incomes",
+        limit_choices_to={"kind": FinanceCategory.Kind.INCOME},
+    )
+    description = models.CharField(max_length=200, blank=True)
+    amount = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        help_text="Money received. For a courier payout this is the NET amount "
+                  "paid out — Steadfast already deducted delivery + its 1% COD fee.",
+    )
+    # DEDUCTED from `amount` (bKash/Nagad cash-out charge on money received).
+    # Net in hand = amount - fee_amount.
+    fee_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        help_text="MFS/cash-out charge taken out of the amount received.",
+    )
+    account = models.CharField(
+        max_length=10, choices=FinanceAccount.choices, default=FinanceAccount.CASH,
+    )
+    reference = models.CharField(max_length=80, blank=True, help_text="Payout / trx id")
+    buyer = models.ForeignKey(
+        Buyer, null=True, blank=True, on_delete=models.SET_NULL, related_name="incomes",
+    )
+    is_credit = models.BooleanField(
+        default=False, help_text="Sold on credit — money not received yet.",
+    )
+    # Same MARK semantics as Expense.orders.
+    orders = models.ManyToManyField(
+        "Order", blank=True, related_name="income_marks",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.date} {self.description or self.category_id}: {self.amount}"
+
+    @property
+    def net_amount(self):
+        """Cash this row put in hand. A credit sale puts in nothing by itself —
+        the money arrives as CreditPayment rows against the buyer's balance."""
+        if self.is_credit:
+            return Decimal("0")
+        return self.amount - self.fee_amount
+
+
+class CreditPayment(models.Model):
+    """Money moved against a CONTACT's running balance — not against one invoice.
+
+    The owner keeps a running account per supplier/buyer: several credits build
+    up, payments come in round amounts, and a payment simply reduces the total
+    owed. Nothing is allocated to a specific Expense/Income row, so no history is
+    ever rewritten — the credits and the payments both stay as they happened and
+    the balance is the difference.
+    """
+
+    class Kind(models.TextChoices):
+        PAYABLE = "payable", "We paid a supplier"
+        RECEIVABLE = "receivable", "A buyer paid us"
+
+    kind = models.CharField(max_length=12, choices=Kind.choices)
+    supplier = models.ForeignKey(
+        Supplier, null=True, blank=True, on_delete=models.CASCADE,
+        related_name="credit_payments",
+    )
+    buyer = models.ForeignKey(
+        Buyer, null=True, blank=True, on_delete=models.CASCADE,
+        related_name="credit_payments",
+    )
+    date = models.DateField(default=timezone.localdate, db_index=True)
+    amount = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        help_text="What changed hands between the two parties — this is what "
+                  "moves the balance.",
+    )
+    fee_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        help_text="MFS/transfer charge. Real money, but it never touches the balance.",
+    )
+    account = models.CharField(
+        max_length=10, choices=FinanceAccount.choices, default=FinanceAccount.CASH,
+    )
+    note = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        who = self.supplier or self.buyer
+        return f"{self.get_kind_display()} {self.amount} ({who})"
+
+    @property
+    def contact_id(self):
+        return self.supplier_id if self.kind == self.Kind.PAYABLE else self.buyer_id
+
+    @property
+    def cash_effect(self):
+        """Cash out for a payable (amount + charge), cash in for a receivable
+        (amount - charge)."""
+        if self.kind == self.Kind.PAYABLE:
+            return self.amount + self.fee_amount
+        return self.amount - self.fee_amount

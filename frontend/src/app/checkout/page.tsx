@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { checkout, getCart, getShopInfo, type CartState, type ShopInfo } from "@/lib/api";
+import { trackBeginCheckout } from "@/lib/analytics";
 import { metaTrack } from "@/lib/meta";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
 import { Container } from "@/components/ui/Container";
@@ -25,6 +26,7 @@ export default function CheckoutPage() {
       .then(([c, s]) => {
         setCart(c); setShop(s);
         metaTrack("InitiateCheckout", { currency: "BDT", value: Number(c.subtotal) });
+        trackBeginCheckout(Number(c.subtotal) || undefined);
       })
       .catch(() => setError("তথ্য লোড করা যায়নি"));
   }, []);
@@ -62,11 +64,10 @@ export default function CheckoutPage() {
         division, district, thana: finalThana,
         address: String(fd.get("address")),
       });
-      metaTrack(
-        "Purchase",
-        { currency: "BDT", value: Number(order.total) },
-        { eventID: `purchase.${order.uid}` },
-      );
+      // No Purchase fires here — COD orders are unconfirmed until an admin
+      // phone-verifies them. The server fires Purchase (CAPI) on confirm, so a
+      // cancelled order never reports a conversion. Attribution (fbp/fbc/url) was
+      // sent to the backend with checkout() and stashed on the order for then.
       router.push(`/track/${order.uid}?new=1`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "সমস্যা হয়েছে");

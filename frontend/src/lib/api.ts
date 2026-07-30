@@ -1,5 +1,6 @@
 // Thin client for the Django API. Base URL from env so dev/prod differ by config.
 
+import { trackAddToCart, trackPurchase } from "./analytics";
 import { metaTrack, metaTracking } from "./meta";
 import { markProgress } from "./progress";
 
@@ -239,6 +240,7 @@ export const addToCart = (
   }).then((r) => {
     metaTrack("AddToCart", { currency: "BDT" });
     markProgress();
+    trackAddToCart({ value: Number(r.subtotal) || undefined });
     return r;
   });
 
@@ -249,6 +251,7 @@ export const addComboToCart = (
   apiSend<CartState>("cart/add/", "POST", { combo_slug: comboSlug, ...(inputs ?? {}) }).then(
     (r) => {
       markProgress();
+      trackAddToCart({ value: Number(r.subtotal) || undefined });
       return r;
     },
   );
@@ -307,7 +310,13 @@ export const checkout = (info: {
   district: string;
   thana: string;
   address: string;
-}) => apiSend<OrderResult>("checkout/", "POST", { ...info, ...metaTracking() });
+}) =>
+  apiSend<OrderResult>("checkout/", "POST", { ...info, ...metaTracking() }).then((r) => {
+    // The order is placed, so this is the conversion from the storefront's point
+    // of view. (Meta's Purchase still waits for an admin to confirm — see CLAUDE.md.)
+    trackPurchase(Number(r.total) || undefined);
+    return r;
+  });
 
 export interface OrderDetail {
   uid: string;

@@ -81,8 +81,9 @@ export default function SiteFooter() {
           <div>
             <ColHeading>শপ</ColHeading>
             <ul className="flex flex-col gap-2.5 text-sm">
+              {/* Keyed by label: two entries point at /products on purpose. */}
               {SHOP_LINKS.map((l) => (
-                <li key={l.href}>
+                <li key={l.label}>
                   <Link href={l.href} className="text-foreground transition hover:text-gold">{l.label}</Link>
                 </li>
               ))}

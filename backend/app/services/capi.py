@@ -198,10 +198,37 @@ def track_purchase(order, *, fbp=None, fbc=None, event_source_url=None, request=
         city=(order.district or order.thana), state=order.division,
         external_id=order.uid, fbp=fbp, fbc=fbc, client_ip=ip, user_agent=ua,
     )
-    custom = {"currency": "BDT", "value": float(order.total)}
+    # Value = subtotal (goods only); delivery is pass-through, not revenue.
+    custom = {"currency": "BDT", "value": float(order.subtotal)}
     return send_event("Purchase", f"purchase.{order.uid}", user_data=ud,
                       custom_data=custom, action_source=action_source,
                       event_source_url=event_source_url)
+
+
+def fire_order_purchase(order):
+    """Purchase for a WEBSITE order, fired when an admin CONFIRMS it (not at
+    checkout). COD orders sit in `in_review` until a human confirms, so a
+    phone-declined order never reports a conversion.
+
+    Uses the fbp/fbc/ip/ua captured on the order at checkout so match quality
+    stays high despite the delay. Deduped by event_id (`purchase.{uid}`), so
+    confirming via different admin paths — or twice — fires exactly once.
+    """
+    fn, ln = _split_name(order.customer_name)
+    ud = build_user_data(
+        email=order.email, phone=order.phone, first_name=fn, last_name=ln,
+        city=(order.district or order.thana), state=order.division,
+        external_id=order.uid,
+        fbp=order.meta_fbp or None, fbc=order.meta_fbc or None,
+        client_ip=order.meta_client_ip or None,
+        user_agent=order.meta_user_agent or None,
+    )
+    # Value = subtotal (goods only). Delivery is pass-through, not revenue, so it
+    # stays out of the conversion value for clean ROAS / value-optimization.
+    custom = {"currency": "BDT", "value": float(order.subtotal)}
+    return send_event("Purchase", f"purchase.{order.uid}", user_data=ud,
+                      custom_data=custom, action_source="website",
+                      event_source_url=order.meta_source_url or None)
 
 
 def track_lead(*, name=None, phone=None, email=None, event_id, fbp=None, fbc=None,
