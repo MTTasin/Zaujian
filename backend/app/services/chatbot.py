@@ -9,6 +9,7 @@ control tags which we parse out before the customer sees them:
 """
 
 import json
+import hashlib
 import logging
 import re
 
@@ -55,6 +56,31 @@ def _clip(text, limit=240):
 
 
 def _shop_facts():
+    """
+    Cached wrapper. This is the heaviest read in the app — it walks every active
+    product, its options and specs, and every combo — and it runs on EVERY
+    chatbot message, while the catalogue changes a few times a week.
+
+    Keyed on the catalogue version (any product/combo write bumps it) plus a
+    fingerprint of `settings.SHOP`, so a delivery charge or bKash number change
+    is a different entry rather than a stale one.
+    """
+    from django.conf import settings as _settings
+
+    from .cache import CATALOGUE_TTL, cached, catalogue_key
+
+    shop = getattr(_settings, "SHOP", {}) or {}
+    fingerprint = hashlib.md5(
+        repr(sorted((str(k), str(v)) for k, v in shop.items())).encode()
+    ).hexdigest()[:8]
+    return cached(
+        lambda: catalogue_key("bot:facts", fingerprint),
+        CATALOGUE_TTL,
+        _build_shop_facts,
+    )
+
+
+def _build_shop_facts():
     # The storefront DB is the single source of truth for products and prices.
     # Without this the model has no numbers to ground on and invents them.
     from decimal import Decimal
@@ -397,7 +423,8 @@ def bot_reply(session, request=None):
         session.save(update_fields=["status", "updated_at"])
         try:
             from .push import send_push
-            send_push("নতুন চ্যাট", "একজন গ্রাহক কথা বলতে চান", "/admin/chats")
+            send_push("নতুন চ্যাট", "একজন গ্রাহক কথা বলতে চান", "/admin/chats",
+                      section="chats")
         except Exception:
             pass
     return msg

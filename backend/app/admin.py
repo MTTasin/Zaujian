@@ -14,6 +14,7 @@ from django.urls import path, reverse
 from django.utils.html import format_html
 
 from .models import (
+    StaffProfile,
     CartItem,
     GalleryPhoto,
     GalleryTag,
@@ -465,3 +466,25 @@ admin.site.index_template = "admin/dashboard_index.html"
 admin.site.site_header = "Zaujain Nikah Point — Admin"
 admin.site.site_title = "Zaujain Admin"
 admin.site.index_title = "Dashboard"
+
+
+# Django's own admin gates on `is_staff` — which is exactly what a moderator has.
+# Without this override the whole section system is bypassable in one URL, since
+# :8000/admin edits the same tables directly. This site is the owner's technical
+# fallback; moderators use the React panel and nothing else.
+def _owner_only(request):
+    user = getattr(request, "user", None)
+    return bool(user and user.is_active and user.is_superuser)
+
+
+admin.site.has_permission = _owner_only
+
+
+@admin.register(StaffProfile)
+class StaffProfileAdmin(admin.ModelAdmin):
+    """Owner-side fallback for granting sections. The React panel's Staff page is
+    the intended UI; this exists so access can always be fixed from Django."""
+
+    list_display = ("user", "note", "updated_at")
+    search_fields = ("user__username", "note")
+    autocomplete_fields = ()

@@ -78,7 +78,14 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Last: it records the outcome, so it must see the response every other
+    # middleware has finished with. Reads the request body on the way in
+    # (before DRF's parsers consume it) and never raises.
+    "app.middleware.AdminAuditMiddleware",
 ]
+
+# How long the admin audit trail is kept (days). Trimmed by `purge_audit_log`.
+AUDIT_RETENTION_DAYS = int(os.getenv("AUDIT_RETENTION_DAYS", "180"))
 
 ROOT_URLCONF = "backend.urls"
 
@@ -184,6 +191,11 @@ if REDIS_URL:
         "default": {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
             "LOCATION": REDIS_URL,
+            # The cPanel Redis is LiteSpeed's, shared with LSCache and anything
+            # else on the account. Namespacing our keys means their "Flush Cache"
+            # button and ours can never be confused for each other, and a stray
+            # key collision is impossible.
+            "KEY_PREFIX": os.getenv("REDIS_KEY_PREFIX", "zaujain"),
         }
     }
     SESSION_ENGINE = "django.contrib.sessions.backends.cache"

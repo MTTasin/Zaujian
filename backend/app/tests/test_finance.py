@@ -326,7 +326,7 @@ class OrderMarkTests(FinanceBase):
 class FinanceApiTests(FinanceBase):
     def setUp(self):
         self.client = APIClient()
-        self.staff = User.objects.create_user("boss", password="x", is_staff=True)
+        self.staff = User.objects.create_superuser("boss", password="x")
         self.client.force_authenticate(self.staff)
 
     # ---- summary ----

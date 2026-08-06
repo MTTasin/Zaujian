@@ -905,7 +905,7 @@ class HomeCategory(models.Model):
 
 
 class PushSubscription(models.Model):
-    """A browser Web Push subscription for the admin (new order / handoff alerts).
+    """A browser Web Push subscription for a staff device (new order / handoff).
 
     Single-admin shop: every saved subscription is notified, so the same admin
     gets alerts on all their registered devices. Stale ones self-delete on send.
@@ -914,6 +914,12 @@ class PushSubscription(models.Model):
     endpoint = models.URLField(max_length=500, unique=True)
     p256dh = models.CharField(max_length=200)
     auth = models.CharField(max_length=100)
+    user = models.ForeignKey(
+        "auth.User", null=True, blank=True, on_delete=models.CASCADE,
+        related_name="push_subscriptions",
+        help_text="Whose device this is. Null = registered before staff accounts "
+                  "existed; treated as the owner, so it still gets everything.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -1380,3 +1386,99 @@ class CreditPayment(models.Model):
         if self.kind == self.Kind.PAYABLE:
             return self.amount + self.fee_amount
         return self.amount - self.fee_amount
+
+
+# --------------------------------------------------------------------------- #
+# Staff / moderators
+# --------------------------------------------------------------------------- #
+
+class StaffProfile(models.Model):
+    """
+    Per-section access for one staff user (a moderator).
+
+    The owner is a superuser and needs no row here — `access_level()` short
+    circuits on `is_superuser`. A staff user WITHOUT a profile therefore has
+    access to nothing, which is the safe default: an account created straight in
+    Django admin cannot inherit power by accident.
+
+    `access` is a plain dict, `{"orders": "full", "finance": "view"}`, validated
+    against `app.permissions.SECTIONS` on write. A dict rather than a row per
+    section because the section list lives in code (it tracks the panel's pages,
+    not data) and the whole map is read on every request.
+    """
+
+    user = models.OneToOneField(
+        "auth.User", on_delete=models.CASCADE, related_name="staff_profile",
+    )
+    access = models.JSONField(
+        default=dict, blank=True,
+        help_text='Section -> "view" | "full". Missing section = no access.',
+    )
+    note = models.CharField(
+        max_length=200, blank=True,
+        help_text="What this person does — e.g. 'packing desk', 'accounts'.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Access for {self.user.username}"
+
+
+class AdminPresence(models.Model):
+    """
+    When each staff account was last seen using the panel — "active now",
+    "active 20m ago".
+
+    Kept off `StaffProfile` on purpose: that model is the permission map and the
+    owner deliberately has no row there, but the owner's presence is exactly the
+    row you most want. One row per staff user, rewritten in place, so this table
+    never grows past the size of the team.
+
+    Written by `AdminAuditMiddleware` on any authenticated `/api/admin/` request
+    (throttled — see `services/presence.py`), which means the panel's own 6s
+    badge poll keeps an open tab looking alive without a write per poll.
+    """
+
+    user = models.OneToOneField(
+        "auth.User", on_delete=models.CASCADE, related_name="presence",
+    )
+    last_seen = models.DateTimeField(default=timezone.now, db_index=True)
+
+    def __str__(self):
+        return f"{self.user.username} seen {self.last_seen:%Y-%m-%d %H:%M}"
+
+
+class AdminAuditLog(models.Model):
+    """
+    Append-only record of every write a staff user makes through the panel.
+
+    Answers "who cancelled this order". Written by `AdminAuditMiddleware`, never
+    edited or deleted through the API; `purge_audit_log` trims it on a schedule
+    so it cannot grow without bound. `username` is snapshotted so the trail
+    survives the account being deleted.
+    """
+
+    user = models.ForeignKey(
+        "auth.User", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="audit_entries",
+    )
+    username = models.CharField(max_length=150)
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=200)
+    section = models.CharField(max_length=32, blank=True)
+    status_code = models.PositiveSmallIntegerField(default=0)
+    object_repr = models.CharField(max_length=200, blank=True)
+    payload = models.JSONField(
+        default=dict, blank=True,
+        help_text="Request body, secrets redacted and truncated.",
+    )
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["section", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.username} {self.method} {self.path} ({self.status_code})"

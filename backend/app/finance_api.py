@@ -1,5 +1,5 @@
 """
-Finance cash-book API (admin panel, English, token auth, IsAdminUser).
+Finance cash-book API (admin panel, English, token auth, "finance" section).
 
 Cash basis. Income = money actually received (Steadfast payouts + any other
 source); the payout figure IS the income — Steadfast has already deducted the
@@ -41,8 +41,9 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
+
+from .permissions import SectionViewSetMixin, section_access
 
 from .models import (
     Buyer,
@@ -295,8 +296,8 @@ class IncomeSerializer(serializers.ModelSerializer):
 # ViewSets
 # --------------------------------------------------------------------------- #
 
-class AdminFinanceCategoryViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminFinanceCategoryViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "finance"
     serializer_class = FinanceCategorySerializer
     queryset = FinanceCategory.objects.all()
 
@@ -320,8 +321,8 @@ class AdminFinanceCategoryViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-class AdminSupplierViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminSupplierViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "finance"
     serializer_class = SupplierSerializer
     queryset = Supplier.objects.all()
 
@@ -333,8 +334,8 @@ class AdminSupplierViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class AdminBuyerViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminBuyerViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "finance"
     serializer_class = BuyerSerializer
     queryset = Buyer.objects.all()
 
@@ -346,8 +347,8 @@ class AdminBuyerViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class AdminExpenseViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminExpenseViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "finance"
     serializer_class = ExpenseSerializer
     queryset = Expense.objects.all()
 
@@ -380,9 +381,9 @@ class AdminExpenseViewSet(viewsets.ModelViewSet):
         return qs.distinct()
 
 
-class AdminCreditPaymentViewSet(viewsets.ModelViewSet):
+class AdminCreditPaymentViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
     """Payments against a contact's running balance (both directions)."""
-    permission_classes = [IsAdminUser]
+    section = "finance"
     serializer_class = CreditPaymentSerializer
     queryset = CreditPayment.objects.all()
 
@@ -402,8 +403,8 @@ class AdminCreditPaymentViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class AdminIncomeViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminIncomeViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "finance"
     serializer_class = IncomeSerializer
     queryset = Income.objects.all()
 
@@ -667,7 +668,7 @@ def _daily(start, end):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("finance")])
 def finance_summary(request):
     start, end = _range(request)
     incomes = Income.objects.filter(date__gte=start, date__lte=end)
@@ -712,7 +713,7 @@ def finance_summary(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("finance")])
 def finance_ledger(request):
     """One contact's full credit statement: every credit, every payment, running
     balance. `?direction=payable|receivable&contact=<id>`."""
@@ -737,7 +738,7 @@ def finance_ledger(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("finance")])
 def finance_meta(request):
     """Form options: accounts + their default fee rate (a pre-fill, never a rule —
     flat charges like NPSB are typed in taka)."""
@@ -753,7 +754,7 @@ def finance_meta(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("finance")])
 def finance_order_search(request):
     """Typeahead for the order-mark picker. Deliberately light — the full admin
     order serializer carries items, config and consignments."""
@@ -767,7 +768,7 @@ def finance_order_search(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("finance")])
 def order_finance(request, pk):
     """Everything marked against one order — read side of the order detail page."""
     expenses = (Expense.objects.filter(orders__id=pk)

@@ -17,7 +17,7 @@ def _img(name="p.jpg"):
 
 class AdminGalleryTests(APITestCase):
     def setUp(self):
-        u = User.objects.create_user("admin", password="x", is_staff=True)
+        u = User.objects.create_superuser("admin", password="x")
         self.client.force_authenticate(u)
 
     def test_bulk_upload_creates_photos(self):

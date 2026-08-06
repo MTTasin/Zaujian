@@ -10,6 +10,7 @@ import {
 } from "@/lib/adminApi";
 import { PageHeader, Card, Select, TextInput, Table, Th, Td, AdminEmpty } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
+import { useCanWrite } from "@/components/admin/AdminAuthProvider";
 
 // Submission date + time in Bangladesh local time (server stores UTC).
 function fmtDate(iso: string): string {
@@ -23,11 +24,26 @@ function fmtDate(iso: string): string {
   });
 }
 
+// Readable names for the colour key (the raw values stay in the dropdowns, so
+// the two always line up).
+const STATUS_LABEL: Record<string, string> = {
+  in_review: "In review",
+  pending_payment: "Pending payment",
+  confirmed: "Confirmed",
+  in_production: "In production",
+  shipped: "Shipped",
+  delivered: "Delivered",
+  cancelled: "Cancelled",
+};
+
 const SORT_KEY = "admin_orders_sort";
 const SORT_DEFAULT = "status";   // workflow priority; the backend defines the order
 
 export default function AdminOrders() {
   const router = useRouter();
+  // View-only moderators get the same page with its write controls disabled —
+  // the backend refuses them anyway; this stops the page lying about it.
+  const canWrite = useCanWrite("orders");
   const [orders, setOrders] = useState<AdminOrder[]>([]);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -138,19 +154,21 @@ export default function AdminOrders() {
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={sync}
-              disabled={syncing}
+              disabled={syncing || !canWrite}
               title="Check every shipped order's parcel on Steadfast; delivered ones become 'delivered'"
               className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-plum/30 bg-white px-4 text-sm font-semibold text-plum transition hover:bg-plum/5 disabled:opacity-50"
             >
               <Icon name="truck" size={16} />
               {syncing ? "Checking Steadfast…" : "Sync Steadfast (shipped)"}
             </button>
-            <Link
-              href="/admin/orders/new"
-              className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-plum px-4 text-sm font-semibold text-white transition hover:bg-wine"
-            >
-              <Icon name="plus" size={16} /> New order
-            </Link>
+            {canWrite && (
+              <Link
+                href="/admin/orders/new"
+                className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-plum px-4 text-sm font-semibold text-white transition hover:bg-wine"
+              >
+                <Icon name="plus" size={16} /> New order
+              </Link>
+            )}
           </div>
         }
       />
@@ -181,6 +199,31 @@ export default function AdminOrders() {
               ))}
             </Select>
           </div>
+        </div>
+
+        {/* Colour key. Each chip is also the status filter, so the colour the
+            admin sees in the table is the control they click. */}
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+          <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Key
+          </span>
+          {ORDER_STATUSES.map((s) => (
+            <button
+              key={s}
+              data-order-status={s}
+              onClick={() => setFilter(filter === s ? "" : s)}
+              aria-pressed={filter === s}
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition ${
+                filter === s
+                  ? "ring-2 ring-plum/40 text-slate-900"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+              style={{ backgroundColor: "var(--row-tint)" }}
+            >
+              <span className="status-swatch h-2.5 w-2.5 shrink-0 rounded-full" />
+              {STATUS_LABEL[s]}
+            </button>
+          ))}
         </div>
       </Card>
 
@@ -222,8 +265,9 @@ export default function AdminOrders() {
             {orders.map((o) => (
               <tr
                 key={o.id}
+                data-order-status={o.status}
                 onClick={() => router.push(`/admin/orders/${o.id}`)}
-                className="cursor-pointer transition hover:bg-plum/5"
+                className="order-row cursor-pointer"
               >
                 <Td>
                   <Link
@@ -258,6 +302,8 @@ export default function AdminOrders() {
                     <Select
                       value={o.status}
                       onChange={(e) => changeStatus(o, e.target.value)}
+                      disabled={!canWrite}
+                      title={canWrite ? undefined : "View-only access"}
                       className="min-h-8 py-1 text-xs"
                     >
                       {ORDER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -265,7 +311,7 @@ export default function AdminOrders() {
                   </div>
                 </Td>
                 <Td>
-                  {ORDER_DELETABLE.has(o.status) ? (
+                  {ORDER_DELETABLE.has(o.status) && canWrite ? (
                     <button
                       onClick={(e) => del(o, e)}
                       aria-label={`Delete order ${o.uid}`}
@@ -275,7 +321,11 @@ export default function AdminOrders() {
                     </button>
                   ) : (
                     <span
-                      title="Only pending or cancelled orders can be deleted — cancel it first."
+                      title={
+                        canWrite
+                          ? "Only pending or cancelled orders can be deleted — cancel it first."
+                          : "View-only access"
+                      }
                       className="text-slate-200"
                     >
                       <Icon name="trash" size={16} />

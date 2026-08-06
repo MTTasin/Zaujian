@@ -1,22 +1,34 @@
 """
-Frontend admin panel API (English). Token-authenticated, IsAdminUser only.
+Frontend admin panel API (English). Token-authenticated.
 
-Sections: auth, dashboard, orders (status/verify/confirm+book Steadfast),
-custom-request pricing, and full catalog CRUD with image upload.
+Every endpoint here declares the **section** it belongs to (see
+`app/permissions.py`): the owner (superuser) sees everything, a moderator sees
+only the sections granted to them, at view or full level. A view that declares
+no section is refused, so forgetting one fails closed.
 
-The Django admin remains available in parallel.
+The Django admin remains available in parallel — owner only.
 """
 
 from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import update_last_login
 from django.utils import timezone
 from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
+
+from .permissions import (
+    AnyStaffPermission,
+    OwnerPermission,
+    SectionViewSetMixin,
+    access_map,
+    can_read,
+    is_owner,
+    section_access,
+)
 
 from .models import (
     CapiEvent,
@@ -44,7 +56,7 @@ from .models import (
     ToppingDesign,
 )
 from .serializers import CartItemSerializer
-from .services import notifications
+from .services import notifications, presence
 from .services.steadfast_order import SteadfastError, create_consignment
 
 
@@ -58,19 +70,37 @@ def admin_login(request):
     username = request.data.get("username")
     password = request.data.get("password")
     user = authenticate(username=username, password=password)
-    if user is None or not user.is_staff:
+    # `authenticate` already refuses inactive users, but say it explicitly:
+    # deactivating a moderator must lock them out, not merely hide the nav.
+    if user is None or not user.is_staff or not user.is_active:
         return Response(
             {"error": "Invalid credentials or not a staff account"},
             status=status.HTTP_401_UNAUTHORIZED,
         )
     token, _ = Token.objects.get_or_create(user=user)
-    return Response({"token": token.key, "username": user.username})
+    # `authenticate()` does not stamp last_login — only `django.contrib.auth.login()`
+    # does, via the user_logged_in signal, and token auth never calls it. Without
+    # this the panel reports whenever the account last used the *Django* admin,
+    # which for the owner meant a months-old date.
+    update_last_login(None, user)
+    presence.touch(user, force=True)
+    return Response({"token": token.key, **_identity(user)})
+
+
+def _identity(user):
+    """What the panel needs to decide which sections to show. The frontend uses
+    this for UX only — every rule is re-checked server-side on each request."""
+    return {
+        "username": user.username,
+        "is_owner": is_owner(user),
+        "access": access_map(user),
+    }
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AnyStaffPermission])
 def admin_me(request):
-    return Response({"username": request.user.username})
+    return Response(_identity(request.user))
 
 
 # --------------------------------------------------------------------------- #
@@ -208,8 +238,9 @@ def _sync_order_from_steadfast(order):
 # Catalog CRUD viewsets  (?product=<id> filter on option endpoints)
 # --------------------------------------------------------------------------- #
 
-class _AdminBase(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class _AdminBase(SectionViewSetMixin, viewsets.ModelViewSet):
+    """Every subclass MUST set `section` — SectionPermission refuses a view
+    that declares none, so a forgotten one fails closed instead of open."""
 
     def get_queryset(self):
         # .all() clones the class-level queryset. Without it the SAME QuerySet
@@ -224,6 +255,7 @@ class _AdminBase(viewsets.ModelViewSet):
 
 
 class AdminProductViewSet(_AdminBase):
+    section = "products"
     queryset = Product.objects.all().prefetch_related("images").order_by("category", "name")
     serializer_class = AdminProductSerializer
 
@@ -239,6 +271,7 @@ class AdminProductViewSet(_AdminBase):
 
 class AdminProductImageViewSet(_AdminBase):
     """Catalog gallery images. ?product=<id> to filter."""
+    section = "products"
 
     queryset = ProductImage.objects.all()
     serializer_class = AdminProductImageSerializer
@@ -252,6 +285,7 @@ class AdminProductSpecSerializer(serializers.ModelSerializer):
 
 class AdminProductSpecViewSet(_AdminBase):
     """Product detail spec rows (label/value). ?product=<id> to filter."""
+    section = "products"
 
     queryset = ProductSpec.objects.all()
     serializer_class = AdminProductSpecSerializer
@@ -265,6 +299,7 @@ class AdminProductFieldSerializer(serializers.ModelSerializer):
 
 class AdminProductFieldViewSet(_AdminBase):
     """Customer input fields asked during customization. ?product=<id> to filter."""
+    section = "products"
 
     queryset = ProductField.objects.all()
     serializer_class = AdminProductFieldSerializer
@@ -276,8 +311,8 @@ class AdminHomeCategorySerializer(serializers.ModelSerializer):
         fields = ["id", "title", "image", "link", "order", "active"]
 
 
-class AdminHomeCategoryViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminHomeCategoryViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "homepage"
     queryset = HomeCategory.objects.all()
     serializer_class = AdminHomeCategorySerializer
 
@@ -379,7 +414,7 @@ def _create_manual_items(order, lines):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("orders")])
 def admin_create_order(request):
     """
     Create an order manually (for orders received off the website — phone,
@@ -436,7 +471,7 @@ def admin_create_order(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("fraud", view_writes=True)])
 def admin_fraud_check(request):
     """Run the courier fraud check (Steadfast + Pathao) for any phone number."""
     from .services.fraud_check import check_phone
@@ -447,7 +482,7 @@ def admin_fraud_check(request):
 
 
 @api_view(["GET", "PATCH", "PUT"])
-@permission_classes([IsAdminUser])
+@permission_classes([OwnerPermission])
 def admin_site_settings(request):
     """Homepage hero/band media + copy (singleton)."""
     obj = SiteSettings.get_solo()
@@ -479,10 +514,10 @@ class AdminLeadSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at"]
 
 
-class AdminLeadViewSet(viewsets.ModelViewSet):
+class AdminLeadViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
     """Manual ad leads. Saving with Qualified/Converted fires CAPI (dedup-guarded)."""
+    section = "leads"
 
-    permission_classes = [IsAdminUser]
     queryset = Lead.objects.all()
     serializer_class = AdminLeadSerializer
 
@@ -513,33 +548,38 @@ class AdminCapiEventSerializer(serializers.ModelSerializer):
         ]
 
 
-class AdminCapiEventViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminCapiEventViewSet(SectionViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    section = "capi"
     queryset = CapiEvent.objects.all()
     serializer_class = AdminCapiEventSerializer
 
 
 class AdminColorViewSet(_AdminBase):
+    section = "products"
     queryset = ColorOption.objects.all()
     serializer_class = AdminColorSerializer
 
 
 class AdminToppingViewSet(_AdminBase):
+    section = "products"
     queryset = ToppingDesign.objects.all()
     serializer_class = AdminToppingSerializer
 
 
 class AdminInsideViewSet(_AdminBase):
+    section = "products"
     queryset = InsideDesign.objects.all()
     serializer_class = AdminInsideSerializer
 
 
 class AdminStaticViewSet(_AdminBase):
+    section = "products"
     queryset = StaticDesign.objects.all()
     serializer_class = AdminStaticSerializer
 
 
 class AdminDupattaViewSet(_AdminBase):
+    section = "products"
     queryset = DupattaOption.objects.all()
     serializer_class = AdminDupattaSerializer
 
@@ -551,6 +591,7 @@ class AdminConfigImageSerializer(serializers.ModelSerializer):
 
 
 class AdminConfigImageViewSet(_AdminBase):
+    section = "products"
     queryset = ConfigurationImage.objects.all()
     serializer_class = AdminConfigImageSerializer
 
@@ -569,6 +610,7 @@ class AdminComboFieldSerializer(serializers.ModelSerializer):
 
 class AdminComboFieldViewSet(_AdminBase):
     """Customer inputs asked on a combo's page (e.g. বরের নাম)."""
+    section = "combos"
 
     queryset = ComboField.objects.all()
     serializer_class = AdminComboFieldSerializer
@@ -614,11 +656,13 @@ class AdminComboSerializer(serializers.ModelSerializer):
 
 
 class AdminComboViewSet(_AdminBase):
+    section = "combos"
     queryset = PrebuiltCombo.objects.all().prefetch_related("images", "products")
     serializer_class = AdminComboSerializer
 
 
 class AdminComboImageViewSet(_AdminBase):
+    section = "combos"
     queryset = ComboImage.objects.all()
     serializer_class = AdminComboImageSerializer
 
@@ -684,8 +728,12 @@ class AdminOrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
+    section = "orders"
+    # Opening the Orders page POSTs mark_seen to clear the badge. Refusing that
+    # for a view-only moderator would look like a broken page, not a read-only
+    # one — it acknowledges a notification, it does not change an order.
+    VIEW_WRITES = ("mark_seen",)
     serializer_class = AdminOrderSerializer
     queryset = Order.objects.all().prefetch_related(
         "items", "extra_consignments__events", "consignment_events")
@@ -770,6 +818,13 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         return qs.order_by(*self.SORTS[sort])
 
     def destroy(self, request, *args, **kwargs):
+        # Owner-only on top of the status guard: a moderator with full Orders
+        # access can CANCEL an order, but erasing one is not delegable.
+        if not is_owner(request.user):
+            return Response(
+                {"error": "Only the owner can delete an order. Cancel it instead."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         order = self.get_object()
         if order.status not in self.DELETABLE_STATUSES:
             return Response(
@@ -898,7 +953,8 @@ class AdminOrderViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         if not order.phone:
             return Response({"error": "Order has no phone number"},
                             status=status.HTTP_400_BAD_REQUEST)
-        order.fraud_check_result = check_phone(order.phone)
+        # The whole point of this button is to go and ask again.
+        order.fraud_check_result = check_phone(order.phone, refresh=True)
         order.save(update_fields=["fraud_check_result", "updated_at"])
         return Response(self.get_serializer(order).data)
 
@@ -1240,8 +1296,8 @@ class AdminCustomRequestSerializer(serializers.ModelSerializer):
         return urls
 
 
-class AdminCustomRequestViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminCustomRequestViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "custom"
     serializer_class = AdminCustomRequestSerializer
     queryset = CustomOrderRequest.objects.all().prefetch_related("reference_images")
 
@@ -1282,7 +1338,7 @@ class AdminCustomRequestViewSet(viewsets.ModelViewSet):
 # --------------------------------------------------------------------------- #
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("analytics")])
 def admin_analytics(request):
     """Chart data: orders + revenue for last 14 days, status breakdown."""
     from datetime import timedelta
@@ -1323,7 +1379,7 @@ def admin_analytics(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("analytics")])
 def admin_analytics_live(request):
     """Visitors right now + a short live event feed. Polled every ~10s."""
     from .models import AnalyticsEvent
@@ -1343,7 +1399,7 @@ def admin_analytics_live(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("analytics")])
 def admin_analytics_overview(request):
     """Dashboard payload: today live from raw tables, history from the rollups.
 
@@ -1498,20 +1554,31 @@ def _device_split(start):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([section_access("dashboard")])
 def admin_dashboard(request):
     today = timezone.localdate()
-    recent = Order.objects.all()[:10]
+
+    # The dashboard is a window onto other sections, so it shows only what the
+    # caller could open directly — a moderator without Finance does not get the
+    # month's takings handed to them on the landing page.
+    sees_money = can_read(request.user, "finance")
+    sees_orders = can_read(request.user, "orders")
+    recent = Order.objects.all()[:10] if sees_orders else Order.objects.none()
 
     # Money is business-wide now (Finance cash-book), not per order: this month's
     # income minus spending. See app/finance_api.py.
-    from .finance_api import month_net
-    net = month_net(today)
+    if sees_money:
+        from .finance_api import month_net
+        net = month_net(today)
+    else:
+        net = {"income": None, "expense": None, "net": None, "dues": None}
 
     from .models import DailyStat
     stat = DailyStat.objects.filter(date=today).first()
 
     return Response({
+        "shows_money": sees_money,
+        "shows_orders": sees_orders,
         "orders_today": Order.objects.filter(created_at__date=today).count(),
         "pending_payment": Order.objects.filter(
             payment_verified=False, status=Order.Status.PENDING_PAYMENT,
@@ -1519,7 +1586,9 @@ def admin_dashboard(request):
         "pending_custom": CustomOrderRequest.objects.filter(
             status=CustomOrderRequest.Status.PENDING,
         ).count(),
-        "total_orders": Order.objects.count(),
+        # Cancelled orders never became sales, so they must not inflate the
+        # headline count the owner reads as "how much have I sold".
+        "total_orders": Order.objects.exclude(status=Order.Status.CANCELLED).count(),
         "month_income": net["income"],
         "month_expense": net["expense"],
         "month_net": net["net"],
@@ -1550,8 +1619,8 @@ class AdminGalleryPhotoSerializer(serializers.ModelSerializer):
         read_only_fields = ["display", "thumbnail"]
 
 
-class AdminGalleryPhotoViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminGalleryPhotoViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "gallery"
     queryset = GalleryPhoto.objects.all()
     serializer_class = AdminGalleryPhotoSerializer
 
@@ -1604,8 +1673,8 @@ class AdminGalleryTagSerializer(serializers.ModelSerializer):
         return slugify(value) if value else value
 
 
-class AdminGalleryTagViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminGalleryTagViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    section = "gallery"
     queryset = GalleryTag.objects.all()
     serializer_class = AdminGalleryTagSerializer
 
@@ -1638,8 +1707,8 @@ from .models import ChatMessage, ChatSession  # noqa: E402
 from .serializers import ChatMessageSerializer, ChatSessionSerializer  # noqa: E402
 
 
-class AdminChatSessionViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAdminUser]
+class AdminChatSessionViewSet(SectionViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    section = "chats"
     serializer_class = ChatSessionSerializer
     queryset = ChatSession.objects.all()
 
@@ -1692,7 +1761,7 @@ class AdminChatSessionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 @api_view(["GET", "PUT"])
-@permission_classes([IsAdminUser])
+@permission_classes([OwnerPermission])
 def admin_bot_config(request):
     """Get or update the editable chatbot instructions (no restart needed)."""
     from .models import BotConfig
@@ -1704,27 +1773,37 @@ def admin_bot_config(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AnyStaffPermission])
 def admin_chat_unread(request):
-    """Count of sessions needing attention (for badge + sound polling)."""
-    waiting = ChatSession.objects.filter(status=ChatSession.Status.WAITING_ADMIN).count()
-    unread = ChatMessage.objects.filter(
-        role=ChatMessage.Role.CUSTOMER, read_by_admin=False,
-        session__status__in=[ChatSession.Status.WAITING_ADMIN, ChatSession.Status.ADMIN],
-    ).count()
-    new_orders = Order.objects.filter(admin_seen=False).count()
+    """
+    Counts for the badge + alert sounds, polled from every admin page.
+
+    Open to any staff account, but each counter is scoped to what the caller may
+    actually see — a packing moderator gets no chat badge. Zeroing beats a 403
+    here: the layout polls this constantly, and one refusal would break every
+    page for someone who simply lacks one section.
+    """
+    waiting = unread = new_orders = 0
+    if can_read(request.user, "chats"):
+        waiting = ChatSession.objects.filter(status=ChatSession.Status.WAITING_ADMIN).count()
+        unread = ChatMessage.objects.filter(
+            role=ChatMessage.Role.CUSTOMER, read_by_admin=False,
+            session__status__in=[ChatSession.Status.WAITING_ADMIN, ChatSession.Status.ADMIN],
+        ).count()
+    if can_read(request.user, "orders"):
+        new_orders = Order.objects.filter(admin_seen=False).count()
     return Response({"waiting": waiting, "unread": unread, "new_orders": new_orders})
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AnyStaffPermission])
 def admin_push_key(request):
     """Public VAPID key the browser needs to subscribe to Web Push."""
     return Response({"public_key": settings.WEBPUSH["VAPID_PUBLIC_KEY"]})
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AnyStaffPermission])
 def admin_push_subscribe(request):
     """Save (or refresh) a browser push subscription for admin alerts."""
     d = request.data or {}
@@ -1733,7 +1812,10 @@ def admin_push_subscribe(request):
     p256dh, auth = keys.get("p256dh"), keys.get("auth")
     if not (endpoint and p256dh and auth):
         return Response({"error": "Invalid subscription"}, status=status.HTTP_400_BAD_REQUEST)
+    # Stamped with the caller so alerts can be aimed at the staff who can act
+    # on them (see services/push.py).
     PushSubscription.objects.update_or_create(
-        endpoint=endpoint, defaults={"p256dh": p256dh, "auth": auth},
+        endpoint=endpoint,
+        defaults={"p256dh": p256dh, "auth": auth, "user": request.user},
     )
     return Response({"ok": True})

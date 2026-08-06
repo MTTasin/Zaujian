@@ -40,7 +40,11 @@ async function req<T>(
   });
   if (res.status === 401) {
     clearToken();
-    if (typeof window !== "undefined") window.location.href = "/admin/login";
+    // Never bounce the login page to itself — that is a full reload, and the
+    // page refires the request on mount, so it loops and no one can type.
+    if (typeof window !== "undefined" && window.location.pathname !== "/admin/login") {
+      window.location.href = "/admin/login";
+    }
     throw new Error("Session expired");
   }
   const data = await res.json().catch(() => ({}));

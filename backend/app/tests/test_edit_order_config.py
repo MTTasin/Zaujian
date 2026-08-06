@@ -8,7 +8,7 @@ from app.models import CartItem, Order, Product
 
 class EditOrderConfigTests(APITestCase):
     def setUp(self):
-        self.client.force_authenticate(User.objects.create_user("admin", password="x", is_staff=True))
+        self.client.force_authenticate(User.objects.create_superuser("admin", password="x"))
         self.order = Order.objects.create(
             customer_name="A", phone="017", subtotal=Decimal("1000"),
         )

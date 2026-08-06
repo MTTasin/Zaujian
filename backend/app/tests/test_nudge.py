@@ -35,7 +35,7 @@ class NudgeEventApiTests(APITestCase):
 
 class DashboardStatsTests(APITestCase):
     def setUp(self):
-        self.client.force_authenticate(User.objects.create_user("admin", password="x", is_staff=True))
+        self.client.force_authenticate(User.objects.create_superuser("admin", password="x"))
 
     def test_dashboard_returns_today_counters(self):
         DailyStat.objects.create(date=timezone.localdate(), visitors=5, popups_shown=2, popups_clicked=1)
@@ -47,3 +47,15 @@ class DashboardStatsTests(APITestCase):
     def test_dashboard_zeros_when_no_row(self):
         r = self.client.get("/api/admin/dashboard/")
         self.assertEqual(r.json()["visitors_today"], 0)
+
+    def test_total_orders_ignores_cancelled(self):
+        """A cancelled order never became a sale — it must not inflate the headline."""
+        from decimal import Decimal
+
+        from app.models import Order
+
+        for status in [Order.Status.DELIVERED, Order.Status.SHIPPED,
+                       Order.Status.CANCELLED]:
+            Order.objects.create(customer_name="A", phone="017",
+                                 subtotal=Decimal("100"), status=status)
+        self.assertEqual(self.client.get("/api/admin/dashboard/").json()["total_orders"], 2)

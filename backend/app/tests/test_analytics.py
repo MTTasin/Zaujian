@@ -285,7 +285,7 @@ class AdminAnalyticsApiTests(APITestCase):
     def setUp(self):
         cache.clear()
         self.client.force_authenticate(
-            User.objects.create_user("admin", password="x", is_staff=True)
+            User.objects.create_superuser("admin", password="x")
         )
 
     def test_endpoints_require_admin(self):

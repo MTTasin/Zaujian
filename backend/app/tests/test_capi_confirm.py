@@ -16,7 +16,7 @@ from app.models import CapiEvent, Order
 class CapiConfirmTimingTests(APITestCase):
     def setUp(self):
         self.client.force_authenticate(
-            User.objects.create_user("admin", password="x", is_staff=True)
+            User.objects.create_superuser("admin", password="x")
         )
         self.order = Order.objects.create(
             customer_name="Real", phone="017111", email="a@b.com",

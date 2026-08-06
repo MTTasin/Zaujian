@@ -83,12 +83,16 @@ body {
   animation: chatFloat 2.8s ease-in-out infinite;
 }
 
-/* Print — Steadfast challan sticker. Force backgrounds/watermark to print. */
+/* Print — Steadfast challan sticker. Force backgrounds/watermark to print.
+   The challan is one full A4 page, so the sheet is sized to A4 minus the
+   6mm printer margin below. */
 @media print {
-  @page { margin: 6mm; }
+  @page { size: A4 portrait; margin: 6mm; }
   .challan-sheet {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+    page-break-after: always;
+    break-after: page;
   }
 }
 
@@ -235,6 +239,70 @@ body {
   fill: #9aa5b6;
 }
 
+/* --------------------------------------------------------------------------
+   Order rows, colour-coded by status
+   --------------------------------------------------------------------------
+   The Orders list is read by scanning, not by parsing the dropdown in every
+   row: one hue per status, walking the workflow around the wheel so no two
+   neighbouring states share a family —
+     in_review orange · pending_payment yellow · confirmed blue ·
+     in_production violet · shipped cyan · delivered green · cancelled grey.
+   Cancelled is deliberately the only greyed row (dead weight) and carries a
+   red rail, so red never competes with the live states.
+
+   Each row also gets a solid left rail in the saturated hue: colour alone is
+   not an accessible signal, so the rail gives position and the dropdown still
+   spells the status out.
+
+   Every tint is defined twice. The light wash would vanish on the admin dark
+   surface (#151c28), so the dark theme gets its own deep tints rather than an
+   opacity trick — that is exactly the "colour dissolves into the background"
+   failure. The vars sit on a plain [data-order-status] selector so the legend
+   swatches on the page can reuse them.
+   -------------------------------------------------------------------------- */
+[data-order-status="in_review"]       { --row-tint:#fff3e4; --row-tint-hover:#ffe6c9; --row-accent:#e2680b; }
+[data-order-status="pending_payment"] { --row-tint:#fffae0; --row-tint-hover:#fdf3c4; --row-accent:#b98900; }
+[data-order-status="confirmed"]       { --row-tint:#eaf1ff; --row-tint-hover:#d9e6ff; --row-accent:#2563eb; }
+[data-order-status="in_production"]   { --row-tint:#f3ecff; --row-tint-hover:#e7dcff; --row-accent:#7c3aed; }
+[data-order-status="shipped"]         { --row-tint:#e3f6fb; --row-tint-hover:#ccedf6; --row-accent:#0e8ba8; }
+[data-order-status="delivered"]       { --row-tint:#e7f7ed; --row-tint-hover:#d3f0de; --row-accent:#15a34a; }
+[data-order-status="cancelled"]       { --row-tint:#f1f2f4; --row-tint-hover:#e5e7ea; --row-accent:#dc2626; }
+
+[data-admin-theme="dark"] [data-order-status="in_review"]       { --row-tint:#2e1c08; --row-tint-hover:#3e260c; --row-accent:#f59e0b; }
+[data-admin-theme="dark"] [data-order-status="pending_payment"] { --row-tint:#2b2607; --row-tint-hover:#3a330c; --row-accent:#eab308; }
+[data-admin-theme="dark"] [data-order-status="confirmed"]       { --row-tint:#101f3d; --row-tint-hover:#16294f; --row-accent:#60a5fa; }
+[data-admin-theme="dark"] [data-order-status="in_production"]   { --row-tint:#231839; --row-tint-hover:#2f204c; --row-accent:#a78bfa; }
+[data-admin-theme="dark"] [data-order-status="shipped"]         { --row-tint:#08252e; --row-tint-hover:#0c313d; --row-accent:#22d3ee; }
+[data-admin-theme="dark"] [data-order-status="delivered"]       { --row-tint:#0b2418; --row-tint-hover:#103122; --row-accent:#34d399; }
+[data-admin-theme="dark"] [data-order-status="cancelled"]       { --row-tint:#1b1f27; --row-tint-hover:#242933; --row-accent:#f87171; }
+
+.order-row {
+  background-color: var(--row-tint, transparent);
+  transition: background-color .15s ease;
+}
+.order-row:hover { background-color: var(--row-tint-hover, transparent); }
+
+/* The rail hangs off the first cell — box-shadow on a <tr> is unreliable. */
+.order-row > td:first-child {
+  box-shadow: inset 4px 0 0 0 var(--row-accent, transparent);
+}
+
+/* Cancelled orders are finished business: dimmed until you hover one. */
+.order-row[data-order-status="cancelled"] { opacity: .68; }
+.order-row[data-order-status="cancelled"]:hover { opacity: 1; }
+
+/* The inline status dropdown picks up its row's accent, so the control and the
+   row agree instead of the select reading as a neutral box on a coloured band. */
+.order-row select {
+  border-color: var(--row-accent, var(--color-slate-300));
+  font-weight: 600;
+}
+
+/* Legend swatch (same vars, so a colour is never defined twice). */
+.status-swatch {
+  background-color: var(--row-accent, currentColor);
+}
+
 /* Printing (challans, order slips) must stay on white paper regardless of the
    screen theme — dark text on a dark card would print as nothing. */
 @media print {
@@ -255,4 +323,6 @@ body {
   }
   [data-admin-theme="dark"] .bg-white { background-color: #ffffff; }
   [data-admin-theme="dark"] .text-plum { color: #5b2a4e; }
+  /* Status row tints are a screen affordance — never a wash of toner. */
+  .order-row { background-color: transparent !important; opacity: 1 !important; }
 }

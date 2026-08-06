@@ -1,16 +1,30 @@
 """Storefront + admin API routes."""
 
 from django.urls import include, path
-from rest_framework.routers import DefaultRouter
+from rest_framework.routers import APIRootView, DefaultRouter
 
-from . import admin_api, finance_api, views
+from . import admin_api, finance_api, staff_api, views
+from .permissions import AnyStaffPermission
 
 router = DefaultRouter()
 router.register(r"products", views.ProductViewSet, basename="product")
 router.register(r"combos", views.ComboViewSet, basename="combo")
 
+
+class _AdminAPIRootView(APIRootView):
+    """The router's own index at /api/admin/ lists every admin endpoint. It
+    inherits the project-wide AllowAny default otherwise, which hands a stranger
+    a map of the admin surface — staff only."""
+
+    permission_classes = [AnyStaffPermission]
+
+
+class _AdminRouter(DefaultRouter):
+    APIRootView = _AdminAPIRootView
+
+
 # Admin (frontend panel) router
-admin_router = DefaultRouter()
+admin_router = _AdminRouter()
 admin_router.register(r"products", admin_api.AdminProductViewSet, basename="admin-product")
 admin_router.register(r"product-images", admin_api.AdminProductImageViewSet, basename="admin-product-image")
 admin_router.register(r"product-specs", admin_api.AdminProductSpecViewSet, basename="admin-product-spec")
@@ -32,6 +46,9 @@ admin_router.register(r"custom-requests", admin_api.AdminCustomRequestViewSet, b
 admin_router.register(r"gallery-photos", admin_api.AdminGalleryPhotoViewSet, basename="admin-gallery-photo")
 admin_router.register(r"gallery-tags", admin_api.AdminGalleryTagViewSet, basename="admin-gallery-tag")
 admin_router.register(r"chats", admin_api.AdminChatSessionViewSet, basename="admin-chat")
+# Staff / moderators (owner only)
+admin_router.register(r"staff", staff_api.AdminStaffViewSet, basename="admin-staff")
+admin_router.register(r"audit-log", staff_api.AdminAuditLogViewSet, basename="admin-audit")
 # Finance cash-book
 admin_router.register(r"finance-categories", finance_api.AdminFinanceCategoryViewSet,
                       basename="admin-finance-category")

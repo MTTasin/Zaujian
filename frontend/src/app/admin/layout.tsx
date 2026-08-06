@@ -9,6 +9,8 @@ import {
   applyTheme, clearTheme, getStoredTheme, nextTheme, storeTheme, type AdminTheme,
 } from "@/lib/adminTheme";
 import { Icon, type IconName } from "@/components/ui/Icon";
+import { AdminAuthProvider, useAdminAuth } from "@/components/admin/AdminAuthProvider";
+import { firstAllowedPath, sectionForPath } from "@/lib/adminAuth";
 
 // VAPID public keys are base64url; PushManager needs a Uint8Array.
 function urlBase64ToBuffer(base64: string): ArrayBuffer {
@@ -67,25 +69,37 @@ function beep(kind: "chat" | "order" = "chat") {
   } catch { /* no audio */ }
 }
 
-const NAV: { href: string; label: string; icon: IconName }[] = [
-  { href: "/admin", label: "Dashboard", icon: "grid" },
-  { href: "/admin/orders", label: "Orders", icon: "cart" },
-  { href: "/admin/analytics", label: "Analytics", icon: "chart" },
-  { href: "/admin/finance", label: "Finance", icon: "wallet" },
-  { href: "/admin/fraud-check", label: "Fraud Check", icon: "phone" },
-  { href: "/admin/leads", label: "Leads", icon: "user" },
-  { href: "/admin/capi-events", label: "CAPI Events", icon: "star" },
-  { href: "/admin/chats", label: "Live Chats", icon: "chat" },
-  { href: "/admin/custom", label: "Custom Requests", icon: "edit" },
-  { href: "/admin/products", label: "Products", icon: "box" },
-  { href: "/admin/customization", label: "Customization", icon: "sliders" },
-  { href: "/admin/combos", label: "Listings", icon: "gift" },
-  { href: "/admin/homepage", label: "Homepage", icon: "home" },
-  { href: "/admin/gallery", label: "Gallery", icon: "image" },
-  { href: "/admin/bot", label: "Bot Instructions", icon: "sparkles" },
+// Every entry carries the section that guards it — the sidebar renders only the
+// ones this account can read (owner-only items appear for the owner alone).
+const NAV: { href: string; label: string; icon: IconName; section: string }[] = [
+  { href: "/admin", label: "Dashboard", icon: "grid", section: "dashboard" },
+  { href: "/admin/orders", label: "Orders", icon: "cart", section: "orders" },
+  { href: "/admin/analytics", label: "Analytics", icon: "chart", section: "analytics" },
+  { href: "/admin/finance", label: "Finance", icon: "wallet", section: "finance" },
+  { href: "/admin/fraud-check", label: "Fraud Check", icon: "phone", section: "fraud" },
+  { href: "/admin/leads", label: "Leads", icon: "mail", section: "leads" },
+  { href: "/admin/capi-events", label: "CAPI Events", icon: "star", section: "capi" },
+  { href: "/admin/chats", label: "Live Chats", icon: "chat", section: "chats" },
+  { href: "/admin/custom", label: "Custom Requests", icon: "edit", section: "custom" },
+  { href: "/admin/products", label: "Products", icon: "box", section: "products" },
+  { href: "/admin/customization", label: "Customization", icon: "sliders", section: "products" },
+  { href: "/admin/combos", label: "Listings", icon: "gift", section: "combos" },
+  { href: "/admin/homepage", label: "Homepage", icon: "home", section: "homepage" },
+  { href: "/admin/gallery", label: "Gallery", icon: "image", section: "gallery" },
+  { href: "/admin/bot", label: "Bot Instructions", icon: "sparkles", section: "bot" },
+  { href: "/admin/staff", label: "Staff", icon: "user", section: "staff" },
+  { href: "/admin/audit", label: "Audit Log", icon: "clock", section: "audit" },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <AdminAuthProvider>
+      <AdminShell>{children}</AdminShell>
+    </AdminAuthProvider>
+  );
+}
+
+function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isLogin = pathname === "/admin/login";
@@ -99,12 +113,23 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [theme, setTheme] = useState<AdminTheme>(getStoredTheme);
   const prevWaiting = useRef(0);
   const prevOrders = useRef<number | null>(null);
+  const { me, loading: authLoading, can, readOnly } = useAdminAuth();
 
   useEffect(() => {
     if (isLogin) { setReady(true); return; }
     if (!getToken()) { router.replace("/admin/login"); return; }
     setReady(true);
   }, [isLogin, pathname, router]);
+
+  // Route guard. Landing on a section you don't hold bounces you to one you do
+  // — cosmetic only, since the API refuses the data either way.
+  const section = sectionForPath(pathname);
+  const allowed = isLogin || authLoading || !me || can(section ?? "");
+  useEffect(() => {
+    if (allowed) return;
+    const fallback = firstAllowedPath(me);
+    if (fallback && fallback !== pathname) router.replace(fallback);
+  }, [allowed, me, pathname, router]);
 
   useEffect(() => setMobileOpen(false), [pathname]);
 
@@ -159,7 +184,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }, [isLogin]);
 
   if (isLogin) return <>{children}</>;
-  if (!ready) {
+  if (!ready || authLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 text-slate-400">
         Loading…
@@ -171,6 +196,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     clearToken();
     router.replace("/admin/login");
   }
+
+  const visibleNav = NAV.filter((n) => can(n.section));
 
   const navItem = (n: (typeof NAV)[number]) => {
     const active =
@@ -218,7 +245,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         {/* Desktop sidebar */}
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-white p-4 md:flex print:!hidden">
           <div className="mb-6 pt-1">{brand}</div>
-          <nav className="flex flex-1 flex-col gap-1">{NAV.map(navItem)}</nav>
+          <nav className="flex flex-1 flex-col gap-1">{visibleNav.map(navItem)}</nav>
           <button
             onClick={toggleTheme}
             className="mt-4 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
@@ -258,7 +285,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </div>
           {mobileOpen && (
             <div className="border-b border-slate-200 bg-white p-3 md:hidden">
-              <nav className="flex flex-col gap-1">{NAV.map(navItem)}</nav>
+              <nav className="flex flex-col gap-1">{visibleNav.map(navItem)}</nav>
               <button
                 onClick={logout}
                 className="mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50"
@@ -269,10 +296,42 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           )}
 
           <main className="p-4 md:p-8 print:p-0">
-            <div className="mx-auto max-w-6xl print:max-w-none">{children}</div>
+            <div className="mx-auto max-w-6xl print:max-w-none">
+              {/* One banner covers every page: a read-only moderator is told
+                  once, at the top, instead of discovering it by getting a 403
+                  from a button. Pages additionally disable their own controls. */}
+              {allowed && section && readOnly(section) && (
+                <div className="mb-4 flex items-center gap-2 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 print:hidden">
+                  <Icon name="x" size={16} />
+                  <span>
+                    <strong>View only.</strong> You can read this section but not change
+                    anything here. Ask the owner if you need to edit.
+                  </span>
+                </div>
+              )}
+              {allowed ? children : <NoAccess hasAny={visibleNav.length > 0} />}
+            </div>
           </main>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Shown while the guard redirects, and permanently for an account with nothing
+    granted — better than a blank screen or a wall of failed requests. */
+function NoAccess({ hasAny }: { hasAny: boolean }) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-6 py-16 text-center">
+      <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-slate-400 shadow-sm">
+        <Icon name="x" size={24} />
+      </span>
+      <p className="font-semibold text-slate-700">No access to this section</p>
+      <p className="text-sm text-slate-400">
+        {hasAny
+          ? "Pick a section from the menu, or ask the owner to grant this one."
+          : "Your account has no sections yet. Ask the owner to grant access."}
+      </p>
     </div>
   );
 }

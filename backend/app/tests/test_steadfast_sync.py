@@ -29,7 +29,7 @@ def _order(status, cid="", **kw):
 class SteadfastSyncTests(APITestCase):
     def setUp(self):
         self.client.force_authenticate(
-            User.objects.create_user("admin", password="x", is_staff=True)
+            User.objects.create_superuser("admin", password="x")
         )
 
     def _sync(self, statuses):

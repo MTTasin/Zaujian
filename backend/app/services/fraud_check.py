@@ -12,6 +12,7 @@ import re
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ def _empty_stats(error=None):
     stats = {"success": 0, "cancel": 0, "total": 0, "success_ratio": 0.0}
     if error:
         stats["error"] = error
+        # A courier that failed knows nothing — that is NOT "0 parcels delivered".
+        stats["counts_available"] = False
     return stats
 
 
@@ -95,7 +98,8 @@ def steadfast_stats(phone):
         except requests.RequestException:
             pass
 
-        return {"success": success, "cancel": cancel, "total": total, "success_ratio": ratio}
+        return {"success": success, "cancel": cancel, "total": total,
+                "success_ratio": ratio, "counts_available": True}
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Steadfast fraud check failed for %s: %s", phone, exc)
         return _empty_stats("Steadfast request error")
@@ -108,6 +112,18 @@ def steadfast_stats(phone):
 # --------------------------------------------------------------------------- #
 
 def pathao_stats(phone):
+    """
+    Pathao's merchant API answers in one of two shapes on the SAME endpoint:
+
+      old:  {"data": {"customer": {"successful_delivery": 9, "total_delivery": 10}}}
+      v2:   {"data": {"version": "v2", "show_count": false,
+                      "customer_rating": "excellent_customer"}}
+
+    Documented buckets: excellent_customer, good_customer, moderate_customer,
+    risky_customer, new_customer — sometimes alongside `risk_level` + `message`.
+    Both shapes are parsed; which one arrives is decided by the account, not by
+    anything we send.
+    """
     username = _cfg("PATHAO_FRAUD_USER")
     password = _cfg("PATHAO_FRAUD_PASSWORD")
     timeout = _cfg("TIMEOUT_SECONDS", 3)
@@ -141,13 +157,36 @@ def pathao_stats(phone):
         if resp.status_code >= 400:
             return _empty_stats(f"Pathao data fetch failed ({resp.status_code})")
 
-        customer = (resp.json().get("data", {}) or {}).get("customer", {}) or {}
+        data = (resp.json() or {}).get("data") or {}
+        customer = data.get("customer") or {}
+
+        # Everything Pathao volunteers besides the counts. `risk_level` and
+        # `message` are not guaranteed — they are read if present and never
+        # required, so a body without them parses exactly as before.
+        graded = {"rating": str(data.get("customer_rating") or "").strip()}
+        for key in ("risk_level", "message"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                graded[key] = value
+
+        # `show_count: false` is Pathao SAYING the counts are withheld, which is
+        # stronger evidence than inferring it from a missing `customer` object —
+        # a stub customer full of zeros alongside show_count:false would
+        # otherwise parse as a real "0 delivered" history.
+        if not customer or data.get("show_count") is False:
+            # Reporting this as 0 delivered / 0 cancelled is a LIE of a different
+            # kind — it reads as "this customer never received a parcel" — so the
+            # counts are marked unavailable and only the grading is passed on.
+            return {"success": 0, "cancel": 0, "total": 0, "success_ratio": 0.0,
+                    "counts_available": False, **graded}
+
         success = int(customer.get("successful_delivery", 0) or 0)
         total = int(customer.get("total_delivery", 0) or 0)
         cancel = max(0, total - success)
         ratio = round(success / total * 100, 2) if total else 0.0
 
-        return {"success": success, "cancel": cancel, "total": total, "success_ratio": ratio}
+        return {"success": success, "cancel": cancel, "total": total,
+                "success_ratio": ratio, "counts_available": True, **graded}
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Pathao fraud check failed for %s: %s", phone, exc)
         return _empty_stats("Pathao request error")
@@ -157,7 +196,7 @@ def pathao_stats(phone):
 # Aggregate + policy
 # --------------------------------------------------------------------------- #
 
-def check_phone(phone):
+def check_phone(phone, refresh=False):
     """
     Run all couriers and aggregate. Returns a dict with per-courier stats, an
     aggregate summary, and an `advance_required` policy decision.
@@ -165,7 +204,14 @@ def check_phone(phone):
     Policy: if there is any delivery history and the aggregate success ratio is
     below MIN_SUCCESS_RATIO, require advance. If there is no history anywhere, or
     all couriers errored, default to requiring advance (safer default, plan §10).
+
+    Cached per phone (`FRAUD_TTL`) because this runs INSIDE checkout: two logins
+    and two lookups against couriers we do not control, on the customer's
+    critical path. A person's delivery history does not move in ten minutes.
+    `refresh=True` bypasses it — that is what the admin's "recheck" button is for.
     """
+    from .cache import FRAUD_TTL
+
     norm = normalize_bd_mobile(phone)
     if not norm:
         return {
@@ -174,11 +220,24 @@ def check_phone(phone):
             "aggregate": {"total": 0, "success_ratio": 0.0},
         }
 
+    key = f"fraud:{norm}"
+    if not refresh:
+        try:
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+        except Exception:                  # noqa: BLE001 - cache down, just look it up
+            logger.warning("fraud cache read failed", exc_info=True)
+
     steadfast = steadfast_stats(norm)
     pathao = pathao_stats(norm)
 
-    total_success = int(steadfast.get("success", 0)) + int(pathao.get("success", 0))
-    total_cancel = int(steadfast.get("cancel", 0)) + int(pathao.get("cancel", 0))
+    # Only couriers that actually reported numbers are summed. Pathao v2 returns
+    # a rating with NO counts, and folding its zeros in would quietly halve a
+    # customer's apparent history.
+    counted = [c for c in (steadfast, pathao) if c.get("counts_available", True)]
+    total_success = sum(int(c.get("success", 0)) for c in counted)
+    total_cancel = sum(int(c.get("cancel", 0)) for c in counted)
     total = total_success + total_cancel
     ratio = round(total_success / total * 100, 2) if total else 0.0
 
@@ -190,7 +249,7 @@ def check_phone(phone):
     else:
         advance_required = ratio < min_ratio
 
-    return {
+    result = {
         "phone": norm,
         "steadfast": steadfast,
         "pathao": pathao,
@@ -202,3 +261,13 @@ def check_phone(phone):
         },
         "advance_required": advance_required,
     }
+
+    # Never cache a transient failure. A courier being down for one request
+    # would otherwise pin "advance required" on that customer for ten minutes —
+    # the cache would turn a blip into a policy.
+    if not ("error" in steadfast or "error" in pathao):
+        try:
+            cache.set(key, result, FRAUD_TTL)
+        except Exception:                  # noqa: BLE001
+            logger.warning("fraud cache write failed", exc_info=True)
+    return result

@@ -7,11 +7,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   adminGet, adminPost, ORDER_STATUSES,
   listColorOptions, listToppingOptions, listInsideOptions, listStaticOptions, listDupattaOptions,
-  type AdminOrder, type AdminOrderItem, type ConsignmentEvent,
+  type AdminOrder, type AdminOrderItem, type ConfigLine, type ConsignmentEvent,
   type ItemConfigField, type ItemConfigComboItem,
   type AdminProduct, type AdminColorOption, type AdminToppingOption,
   type AdminInsideOption, type AdminStaticOption, type AdminDupattaOption,
 } from "@/lib/adminApi";
+import { CourierGrading, type CourierStat } from "@/components/admin/CourierGrading";
 import { getOrderFinance } from "@/lib/financeApi";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
 import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, StatusPill, Loading } from "@/components/admin/ui";
@@ -443,20 +444,22 @@ export default function AdminOrderDetail() {
                 <div className="flex-1 text-sm">
                   <div className="font-medium text-slate-900">{it.product_name}</div>
                   {(it.config_display?.length ?? 0) > 0 ? (
-                    <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      {it.config_display.map((c, i) => (
-                        <div key={i} className="rounded-lg border border-slate-200 p-1 text-center">
-                          {c.image ? (
-                            <a href={c.image} target="_blank" rel="noreferrer" className="relative block aspect-square w-full overflow-hidden rounded">
-                              <Image src={c.image} alt={c.label} fill sizes="120px" className="object-cover" />
+                    <>
+                      {/* Picked designs stay tiles — the picture IS the answer. */}
+                      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {it.config_display.filter((c) => c.image).map((c, i) => (
+                          <div key={i} className="rounded-lg border border-slate-200 p-1 text-center">
+                            <a href={c.image!} target="_blank" rel="noreferrer" className="relative block aspect-square w-full overflow-hidden rounded">
+                              <Image src={c.image!} alt={c.label} fill sizes="120px" className="object-cover" />
                             </a>
-                          ) : (
-                            <div className="flex aspect-square items-center justify-center rounded bg-slate-100 text-xs text-slate-400">{c.value}</div>
-                          )}
-                          <div className="mt-1 text-xs font-medium text-slate-700">{c.label}</div>
-                        </div>
-                      ))}
-                    </div>
+                            <div className="mt-1 text-xs font-medium text-slate-700">{c.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* Typed answers are text to be re-typed into a design file —
+                          rows read faster than tiles, and each one is copyable. */}
+                      <TextAnswers lines={it.config_display.filter((c) => !c.image)} />
+                    </>
                   ) : it.category === "combo" ? (
                     <div className="text-slate-400">Prebuilt combo</div>
                   ) : null}
@@ -882,6 +885,51 @@ export default function AdminOrderDetail() {
 }
 
 /**
+ * The customer's typed answers, one per row, each copyable — these get pasted
+ * into the design file one at a time, so a tile grid made the owner re-type them.
+ */
+function TextAnswers({ lines }: { lines: ConfigLine[] }) {
+  const [copied, setCopied] = useState<string>("");
+  if (!lines.length) return null;
+
+  async function copy(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(""), 1500);
+    } catch { /* clipboard unavailable (http, old browser) */ }
+  }
+
+  const all = lines.map((l) => `${l.label}: ${l.value}`).join("\n");
+
+  return (
+    <div className="mt-2 overflow-hidden rounded-lg border border-slate-200">
+      {lines.map((l, i) => (
+        <div key={i} className="flex items-center gap-2 border-b border-slate-100 px-2 py-1.5 last:border-0">
+          <span className="w-32 shrink-0 truncate text-xs text-slate-500" title={l.label}>
+            {l.label}
+          </span>
+          <span className="min-w-0 flex-1 wrap-break-word font-medium text-slate-900">
+            {l.value || "—"}
+          </span>
+          <button type="button" onClick={() => copy(l.value, String(i))}
+            title="Copy this answer"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-plum">
+            {copied === String(i)
+              ? <Icon name="check" size={14} />
+              : <Icon name="copy" size={14} />}
+          </button>
+        </div>
+      ))}
+      <button type="button" onClick={() => copy(all, "all")}
+        className="w-full bg-slate-50 px-2 py-1.5 text-left text-xs font-medium text-plum hover:bg-slate-100">
+        {copied === "all" ? "Copied all" : "Copy all"}
+      </button>
+    </div>
+  );
+}
+
+/**
  * A parcel's tracking history, newest first — only ever filled by Steadfast's
  * webhook (their API can be polled for a single status string and nothing else),
  * so it stays hidden until the first push arrives.
@@ -981,7 +1029,6 @@ function Row({ k, v }: { k: string; v: string }) {
 }
 
 // Readable courier delivery-history summary (instead of raw JSON).
-interface CourierStat { success?: number; cancel?: number; total?: number; success_ratio?: number; error?: string }
 function FraudSummary({ data }: { data: Record<string, unknown> }) {
   if (!data || Object.keys(data).length === 0)
     return <p className="text-sm text-slate-400">No data.</p>;
@@ -1010,6 +1057,10 @@ function FraudSummary({ data }: { data: Record<string, unknown> }) {
               <td className="py-1 font-medium text-slate-800">{name}</td>
               {s.error ? (
                 <td colSpan={3} className="text-slate-400">{s.error}</td>
+              ) : s.counts_available === false ? (
+                <td colSpan={3}>
+                  <CourierGrading stat={s} courier={name} />
+                </td>
               ) : (
                 <>
                   <td>{s.success ?? 0}</td>

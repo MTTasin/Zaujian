@@ -8,7 +8,7 @@ from app.models import CartItem, ColorOption, DupattaOption, Order, Product
 
 class EditItemOptionsTests(APITestCase):
     def setUp(self):
-        self.client.force_authenticate(User.objects.create_user("admin", password="x", is_staff=True))
+        self.client.force_authenticate(User.objects.create_superuser("admin", password="x"))
         self.order = Order.objects.create(customer_name="A", phone="017", subtotal=Decimal("1000"))
         self.book = Product.objects.create(name="বই", slug="boi", kind="layered", base_price=Decimal("1000"))
         self.red = ColorOption.objects.create(product=self.book, name="লাল", price_modifier=Decimal("0"))

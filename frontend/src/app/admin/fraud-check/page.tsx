@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { adminPost } from "@/lib/adminApi";
+import { CourierGrading, type CourierStat as Stat } from "@/components/admin/CourierGrading";
 import { PageHeader, Card, AdminButton, Field, TextInput, Table, Th, Td } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
 
-interface Stat { success?: number; cancel?: number; total?: number; success_ratio?: number; error?: string }
 interface FraudResult {
   phone?: string;
   error?: string;
@@ -87,6 +87,12 @@ export default function AdminFraudCheck() {
                     <Td className="font-medium text-slate-900">{name}</Td>
                     {s.error ? (
                       <td colSpan={3} className="border-t border-slate-100 px-4 py-3 text-slate-400">{s.error}</td>
+                    ) : s.counts_available === false ? (
+                      // No numbers reported. Showing 0/0/0% here would read as
+                      // "never received a parcel", which is a claim we can't make.
+                      <td colSpan={3} className="border-t border-slate-100 px-4 py-3">
+                        <CourierGrading stat={s} courier={name} />
+                      </td>
                     ) : (
                       <>
                         <Td className="tabular-nums">{s.success ?? 0}</Td>

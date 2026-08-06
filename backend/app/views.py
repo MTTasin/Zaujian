@@ -37,6 +37,7 @@ from .serializers import (
 )
 from .services import notifications
 from .services.chatbot import bot_reply
+from .services.cache import CATALOGUE_TTL, cached, catalogue_key, request_host
 from .services.fraud_check import check_phone
 from .services.pricing import price_selection
 
@@ -76,7 +77,20 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
 @api_view(["GET"])
 def home_view(request):
     """Everything the homepage needs in one call: hero, category tiles,
-    featured products, popular products."""
+    featured products, popular products.
+
+    Cached: every storefront visitor hits this, it touches five tables plus
+    image prefetches, and it changes only when the catalogue does. The key
+    carries the host because the serialized payload embeds absolute media URLs.
+    """
+    return Response(cached(
+        lambda: catalogue_key("home", request_host(request)),
+        CATALOGUE_TTL,
+        lambda: _home_payload(request),
+    ))
+
+
+def _home_payload(request):
     ctx = {"request": request}
     site = SiteSettings.get_solo()
     cats = HomeCategory.objects.filter(active=True)
@@ -90,12 +104,12 @@ def home_view(request):
         Product.objects.filter(active=True, is_popular=True, kind=Product.Kind.SIMPLE)
         .prefetch_related("images").order_by("home_order", "name")
     )
-    return Response({
+    return {
         "site": SiteSettingsSerializer(site, context=ctx).data,
         "categories": HomeCategorySerializer(cats, many=True, context=ctx).data,
         "featured": ProductListSerializer(featured, many=True, context=ctx).data,
         "popular": ProductListSerializer(popular, many=True, context=ctx).data,
-    })
+    }
 
 
 @api_view(["POST"])
@@ -137,8 +151,19 @@ def delivery_charge_for(district):
 
 @api_view(["GET"])
 def shop_info(request):
-    """Public checkout config: delivery charge + manual payment numbers."""
-    return Response({
+    """Public checkout config: delivery charge + manual payment numbers.
+
+    Pure `settings.SHOP` reads, so this is cheap — but it is fetched on every
+    checkout and every cart view, and on 2G the round trip costs more than the
+    query does. Cached on the catalogue version so a settings change after a
+    restart is picked up within the TTL at worst.
+    """
+    return Response(cached(lambda: catalogue_key("shop-info"), CATALOGUE_TTL,
+                           _shop_info_payload))
+
+
+def _shop_info_payload():
+    return {
         "delivery_charge": settings.SHOP["DELIVERY_CHARGE"],
         "delivery_charge_inside": settings.SHOP["DELIVERY_CHARGE_INSIDE"],
         "inside_district": settings.SHOP["INSIDE_DISTRICT"],
@@ -146,7 +171,7 @@ def shop_info(request):
         "bkash_number": settings.SHOP["BKASH_NUMBER"],
         "nagad_number": settings.SHOP["NAGAD_NUMBER"],
         "whatsapp_number": settings.SHOP["WHATSAPP_NUMBER"],
-    })
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -401,7 +426,8 @@ def checkout(request):
     # Web Push alert to the admin (never breaks checkout).
     try:
         from .services.push import send_push
-        send_push("নতুন অর্ডার", f"{order.customer_name} — ৳{order.total}", "/admin/orders")
+        send_push("নতুন অর্ডার", f"{order.customer_name} — ৳{order.total}", "/admin/orders",
+                  section="orders")
     except Exception:
         logging.getLogger(__name__).exception("push failed for %s", order.uid)
 

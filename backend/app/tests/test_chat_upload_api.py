@@ -27,7 +27,7 @@ class ChatUploadApiTests(APITestCase):
 
     def test_admin_reply_with_image_sets_admin_status(self):
         s = ChatSession.objects.create(token="tok")
-        u = User.objects.create_user("a", password="x", is_staff=True)
+        u = User.objects.create_superuser("a", password="x")
         self.client.force_authenticate(u)
         r = self.client.post(
             f"/api/admin/chats/{s.id}/reply/", {"image": _img()}, format="multipart",

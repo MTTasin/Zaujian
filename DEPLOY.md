@@ -159,6 +159,57 @@ source of the hub-by-hub tracking history.
 The bulk "Sync Steadfast (shipped)" button stays as the backstop for missed pushes;
 don't remove it. Blank token = endpoint answers 503 to everyone, by design.
 
+## Redis (optional, one-time setup)
+Everything works **without** Redis — `REDIS_URL` unset falls back to `LocMemCache`
+and DB sessions, and every cached read still has a short TTL. Redis buys two things:
+one shared cache across all Passenger workers (so an admin edit clears *everyone's*
+copy instantly instead of within the TTL), and sessions that survive a restart.
+
+1. cPanel → search **Redis**. Depending on the host it's *"Redis"*, *"Redis Manager"*
+   or under **Databases**. If it isn't there, the host doesn't offer it — stop here,
+   nothing is broken.
+   On this host it is **LiteSpeed Redis Cache Manager** → *Enable Redis Service*.
+   It reports its socket as `/tmp/redis.sock` (per-user under CageFS).
+2. Copy what it gives you. It will be one of:
+   - a **Unix socket** path → `REDIS_URL=unix:///tmp/redis.sock?db=3`
+   - a **host/port + password** → `REDIS_URL=redis://:PASSWORD@127.0.0.1:6379/3`
+
+   A password with `@ : / #` in it must be **URL-encoded**, same rule as `DATABASE_URL`.
+   Use a **db index other than 0** — LSCache/WordPress default to 0, and we keep
+   our keys out of theirs. `KEY_PREFIX` (`zaujain`, overridable with
+   `REDIS_KEY_PREFIX`) namespaces them on top of that.
+3. Set `REDIS_URL` in the cPanel **Python App env vars** → **restart the app**.
+   (It's read at runtime, so a restart is enough — no rebuild.)
+4. Verify from the app's virtualenv:
+   ```bash
+   cd /home/mttasinc/backzaujain.mttasin.com
+   /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python -c "
+   import django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','backend.settings'); django.setup()
+   from django.core.cache import cache
+   from django.conf import settings
+   print('backend:', settings.CACHES['default']['BACKEND'])
+   cache.set('ping','pong',10); print('roundtrip:', cache.get('ping'))"
+   ```
+   Expect `RedisCache` and `pong`. `LocMemCache` = the env var didn't reach the app;
+   an exception = the URL or password is wrong.
+5. Sanity-check the real thing: open the storefront, change a product price in the
+   admin, reload — the new price should appear **immediately**, not after 5 minutes.
+
+**Memory:** the plan is 128MB with eviction. That is plenty here (the whole catalogue
+payload is a few hundred KB), and eviction is safe by design — every cached value is
+recomputable and a miss just rebuilds it. Do **not** raise the TTLs to "save" memory;
+the TTL is the staleness bound, not a cost control.
+
+**Shared instance, two consequences.** The *Flush Cache* button in LiteSpeed's Redis
+panel wipes our keys too: harmless for the caches (everything is recomputable) but it
+**signs out Django-admin sessions**, since `SESSION_ENGINE` moves to the cache when
+Redis is on. The React admin panel authenticates with a localStorage token and is
+unaffected; so is the storefront cart (`X-Cart-Token`). If Redis is ever disabled
+again, just unset `REDIS_URL` and restart — LocMem takes over.
+
+**Never** point a job queue at this instance. There is no worker process on this host
+to consume one.
+
 ## Post-deploy checklist
 - [ ] **AutoSSL** issued for both subdomains (https works).
 - [ ] Frontend → backend API calls succeed (CORS = `https://zaujain.mttasin.com`).
@@ -167,6 +218,7 @@ don't remove it. Blank token = endpoint answers 503 to everyone, by design.
 - [ ] Place a **test order** → confirm + book Steadfast → challan prints.
 - [ ] Steadfast **webhook** saved in their panel + `STEADFAST_WEBHOOK_TOKEN` set (see above).
 - [ ] Meta **Purchase** fires (with `META_TEST_EVENT_CODE` set → Test Events; then blank it for live).
+- [ ] *(optional)* **Redis** wired: `REDIS_URL` set, the roundtrip check prints `RedisCache` + `pong` (see above).
 
 ## Server paths (current host)
 ```
@@ -207,6 +259,7 @@ just runs the batch during peak traffic.
 | `purge_old_chat_uploads` | `40 4 * * *` | 04:40 daily |
 | `send_pending_capi` | `*/15 * * * *` | every 15 min |
 | `purge_orphan_media` | `55 4 1 * *` | 04:55, 1st of month |
+| `purge_audit_log` | `5 5 1 * *` | 05:05, 1st of month (admin audit trail, 180 days) |
 
 ```
 # Daily — delete chat images older than 30 days
@@ -217,6 +270,7 @@ cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzauja
 
 # Monthly — delete media files no DB row references (safety net for django-cleanup)
 cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py purge_orphan_media >> cron.log 2>&1
+cd /home/mttasinc/backzaujain.mttasin.com && /home/mttasinc/virtualenv/backzaujain.mttasin.com/3.13/bin/python manage.py purge_audit_log >> cron.log 2>&1
 
 # Daily 04:10 Dhaka — aggregate yesterday's analytics into the permanent rollups.
 # Only ever reads YESTERDAY, so a visitor browsing at 4am is unaffected.

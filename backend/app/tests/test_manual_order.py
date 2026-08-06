@@ -19,7 +19,7 @@ from app.models import (
 class ManualOrderTests(APITestCase):
     def setUp(self):
         self.client.force_authenticate(
-            User.objects.create_user("admin", password="x", is_staff=True))
+            User.objects.create_superuser("admin", password="x"))
         self.product = Product.objects.create(
             name="বই", slug="boi", kind="layered", base_price=Decimal("1200"))
         ProductField.objects.create(product=self.product, label="বরের নাম", order=1)
@@ -143,7 +143,7 @@ class ManualOrderEditTests(APITestCase):
 
     def setUp(self):
         self.client.force_authenticate(
-            User.objects.create_user("admin2", password="x", is_staff=True))
+            User.objects.create_superuser("admin2", password="x"))
         self.combo = PrebuiltCombo.objects.create(
             name="কম্বো", slug="c1", price=Decimal("1000"))
         with patch("app.services.capi.track_purchase", return_value=None):
@@ -183,7 +183,7 @@ class ManualOrderEditTests(APITestCase):
 class ManualOrderCatalogueTests(APITestCase):
     def setUp(self):
         self.client.force_authenticate(
-            User.objects.create_user("admin3", password="x", is_staff=True))
+            User.objects.create_superuser("admin3", password="x"))
         self.combo = PrebuiltCombo.objects.create(
             name="কম্বো", slug="c1", price=Decimal("1000"), category="কম্বো")
         ComboField.objects.create(combo=self.combo, label="তারিখ")

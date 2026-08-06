@@ -8,7 +8,7 @@ from app.models import Product, ProductField
 
 class AdminProductFieldTests(APITestCase):
     def setUp(self):
-        self.client.force_authenticate(User.objects.create_user("a", password="x", is_staff=True))
+        self.client.force_authenticate(User.objects.create_superuser("a", password="x"))
         self.product = Product.objects.create(
             name="Book", slug="book-apf", kind=Product.Kind.LAYERED, category="book",
             base_price=Decimal("1250"), active=True,

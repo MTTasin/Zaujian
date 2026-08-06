@@ -60,7 +60,7 @@ from rest_framework.test import APITestCase
 @override_settings(COURIER={"STEADFAST_API_KEY": "k", "STEADFAST_SECRET_KEY": "s", "TIMEOUT_SECONDS": 3})
 class BookExtraApiTests(APITestCase):
     def setUp(self):
-        self.client.force_authenticate(User.objects.create_user("admin", password="x", is_staff=True))
+        self.client.force_authenticate(User.objects.create_superuser("admin", password="x"))
         self.order = Order.objects.create(customer_name="Real", phone="017111",
                                           subtotal=Decimal("1000"), delivery_charge=Decimal("80"))
 

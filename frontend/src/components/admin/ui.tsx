@@ -27,6 +27,22 @@ export function PageHeader({
   );
 }
 
+/**
+ * Marks a page the current user may read but not change. Write controls stay
+ * visible and disabled rather than hidden — a moderator should be able to see
+ * that the action exists and ask for it, not wonder where it went.
+ */
+export function ViewOnlyPill() {
+  return (
+    <span
+      title="You have view-only access to this section. Ask the owner for full access."
+      className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700"
+    >
+      <Icon name="x" size={12} /> View only
+    </span>
+  );
+}
+
 export function Card({
   className,
   children,
@@ -160,6 +176,7 @@ const STATUS_TONES: Record<string, string> = {
   slate: "bg-slate-100 text-slate-600",
 };
 const STATUS_MAP: Record<string, keyof typeof STATUS_TONES> = {
+  in_review: "amber",
   pending_payment: "amber",
   pending: "amber",
   confirmed: "blue",

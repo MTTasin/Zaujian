@@ -241,7 +241,7 @@ class WebhookTrackingUpdateTests(APITestCase):
         from django.contrib.auth.models import User
         self.post(_tracking("555"))
         self.client.force_authenticate(
-            User.objects.create_user("admin", password="x", is_staff=True))
+            User.objects.create_superuser("admin", password="x"))
         data = self.client.get(f"/api/admin/orders/{self.order.id}/").data
         self.assertEqual(len(data["consignment_events"]), 1)
         self.assertEqual(data["consignment_events"][0]["tracking_message"],
