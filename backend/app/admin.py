@@ -34,6 +34,7 @@ from .models import (
     Income,
     InsideDesign,
     Order,
+    OrderTag,
     PrebuiltCombo,
     Product,
     StaticDesign,
@@ -226,8 +227,10 @@ class OrderAdmin(admin.ModelAdmin):
         "uid", "customer_name", "phone", "is_repeat_customer", "status", "total_display",
         "payment_verified", "advance_required", "courier_submitted",
     )
-    list_filter = ("status", "payment_verified", "advance_required", "courier_submitted", "is_repeat_customer")
-    search_fields = ("uid", "customer_name", "phone", "email", "transaction_id")
+    list_filter = ("status", "payment_verified", "advance_required", "courier_submitted",
+                   "is_repeat_customer", "tags")
+    search_fields = ("uid", "customer_name", "phone", "email", "transaction_id", "tags__name")
+    filter_horizontal = ("tags",)
     readonly_fields = (
         "created_at", "updated_at", "fraud_check_result",
         "steadfast_consignment_id", "steadfast_tracking_code", "steadfast_status",
@@ -488,3 +491,17 @@ class StaffProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "note", "updated_at")
     search_fields = ("user__username", "note")
     autocomplete_fields = ()
+
+
+@admin.register(OrderTag)
+class OrderTagAdmin(admin.ModelAdmin):
+    """Admin-only order markings. The React panel manages these day to day; this
+    is the owner's fallback, and it makes the tag list searchable from Django."""
+
+    list_display = ("name", "colour", "order_count")
+    search_fields = ("name",)
+    list_filter = ("colour",)
+
+    @admin.display(description="Orders")
+    def order_count(self, obj):
+        return obj.orders.count()

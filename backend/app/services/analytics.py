@@ -10,6 +10,7 @@ Design constraints that shaped this (see CLAUDE.md):
     store IP or user-agent, only a coarse device class derived from the UA.
 """
 
+import logging
 import re
 from datetime import timedelta
 from urllib.parse import urlsplit
@@ -19,6 +20,31 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from ..models import AnalyticsEvent, VisitorSession
+
+logger = logging.getLogger(__name__)
+
+
+# Every cache read/write here goes through these. Redis is 128MB with eviction
+# and is shared with sessions, so a key can vanish, and the server can refuse a
+# connection outright — neither is a reason for a page to return 500. The rest
+# of the codebase already treats a cache miss as harmless (services/cache.py);
+# this module was reaching for `cache` directly, which made the analytics page
+# the one screen that dies when Redis hiccups.
+def _cache_get(key, default=None):
+    try:
+        hit = cache.get(key)
+    except Exception:                     # noqa: BLE001 - a cache is never load-bearing
+        logger.warning("Analytics cache read failed for %s", key, exc_info=True)
+        return default
+    return default if hit is None else hit
+
+
+def _cache_set(key, value, seconds):
+    try:
+        cache.set(key, value, seconds)
+    except Exception:                     # noqa: BLE001
+        logger.warning("Analytics cache write failed for %s", key, exc_info=True)
+
 
 # "Right now" window. 5 min matches how a shop owner thinks about it (Google's
 # realtime card uses 30 min, which feels wrong at this scale).
@@ -63,7 +89,7 @@ KNOWN_SLUG_SECONDS = 300    # a listing published now shows by name within 5 min
 def _known_slugs(kind):
     """Slugs that really exist, cached — this runs on every pageview event."""
     key = f"analytics:slugs:{kind}"
-    slugs = cache.get(key)
+    slugs = _cache_get(key)
     if slugs is None:
         if kind == "combo":
             from ..models import PrebuiltCombo
@@ -71,7 +97,7 @@ def _known_slugs(kind):
         else:
             from ..models import GalleryTag
             slugs = set(GalleryTag.objects.values_list("slug", flat=True))
-        cache.set(key, slugs, KNOWN_SLUG_SECONDS)
+        _cache_set(key, slugs, KNOWN_SLUG_SECONDS)
     return slugs
 
 
@@ -149,12 +175,12 @@ def _clean_props(raw):
 def rate_limited(visitor_id):
     """True when this visitor has already burned its per-minute allowance."""
     key = f"analytics:rl:{visitor_id}"
-    hits = cache.get(key) or 0
+    hits = _cache_get(key, 0) or 0
     if hits >= RATE_LIMIT_PER_MIN:
         return True
     # Not atomic across workers; that's fine for a flood guard, and it avoids
     # depending on a specific cache backend's incr semantics.
-    cache.set(key, hits + 1, 60)
+    _cache_set(key, hits + 1, 60)
     return False
 
 
@@ -252,7 +278,7 @@ def presence(window=PRESENCE_WINDOW, use_cache=True):
     10s dashboard poll costs one query, not one per admin.
     """
     if use_cache:
-        hit = cache.get(PRESENCE_CACHE_KEY)
+        hit = _cache_get(PRESENCE_CACHE_KEY)
         if hit is not None:
             return hit
 
@@ -282,7 +308,7 @@ def presence(window=PRESENCE_WINDOW, use_cache=True):
         "in_wizard": live.filter(current_path__startswith="/customize").count(),
     }
     if use_cache:
-        cache.set(PRESENCE_CACHE_KEY, data, PRESENCE_CACHE_SECONDS)
+        _cache_set(PRESENCE_CACHE_KEY, data, PRESENCE_CACHE_SECONDS)
     return data
 
 

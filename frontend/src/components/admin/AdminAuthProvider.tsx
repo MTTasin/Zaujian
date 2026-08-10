@@ -26,6 +26,27 @@ const Ctx = createContext<AuthValue>({
  * Purely for rendering decisions — the backend re-checks every request, so a
  * user who edits this in devtools just gets 403s from a prettier page.
  */
+const CACHE_KEY = "zaujain_admin_me";
+
+/**
+ * The last answer `me/` gave, so a returning admin sees the panel instead of a
+ * spinner while a cold backend wakes up.
+ *
+ * Safe to trust for RENDERING because that is all this provider was ever for:
+ * the backend re-checks every section on every request, so a stale cache buys a
+ * moderator nothing but 403s from a prettier page. It is refreshed in the
+ * background on every mount and cleared on logout.
+ */
+function readCachedMe(): AdminMe | null {
+  if (typeof window === "undefined" || !getToken()) return null;
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    return raw ? (JSON.parse(raw) as AdminMe) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AdminAuthProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = useState<AdminMe | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,12 +60,30 @@ export function AdminAuthProvider({ children }: { children: React.ReactNode }) {
     let alive = true;
     // No token = the login page. Asking who we are would 401, and a 401 sends
     // the browser to /admin/login — which is where we already are.
-    if (!getToken()) { setMe(null); setLoading(false); return; }
+    if (!getToken()) {
+      localStorage.removeItem(CACHE_KEY);
+      setMe(null); setLoading(false);
+      return;
+    }
     if (me) return;  // already know this session
-    setLoading(true);
+
+    // Render from the cache immediately and revalidate behind it. Set in an
+    // effect rather than as the initial state so the server-rendered markup and
+    // the first client render agree.
+    const cached = readCachedMe();
+    if (cached) { setMe(cached); setLoading(false); }
+    else setLoading(true);
+
     adminGet<AdminMe>("me/")
-      .then((data) => alive && setMe(data))
-      .catch(() => alive && setMe(null))
+      .then((data) => {
+        if (!alive) return;
+        localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+        setMe(data);
+      })
+      // A failed refresh must not log a working session out of its own UI: the
+      // token is still there, and a 401 has already redirected. Keep what we
+      // have and let the next navigation try again.
+      .catch(() => { if (alive && !cached) setMe(null); })
       .finally(() => alive && setLoading(false));
     return () => { alive = false; };
   }, [pathname, me]);

@@ -438,6 +438,39 @@ class CustomOrderReferenceImage(models.Model):
 # Orders
 # --------------------------------------------------------------------------- #
 
+class OrderTag(models.Model):
+    """A free-form marking an admin puts on orders — "urgent", "gift wrap",
+    "call before delivery", "photo pending".
+
+    Deliberately its OWN table rather than a text field on the order: a tag has
+    to be renameable in one place (rename it and every order follows) and
+    searchable without matching a customer whose name happens to contain the
+    word. Status stays a status; this is for everything the workflow does not
+    model and never should.
+    """
+
+    # Preset swatches rather than a colour picker: the point is that a tag is
+    # recognisable at a glance across a list, which needs few, distinct colours.
+    class Colour(models.TextChoices):
+        SLATE = "slate", "Grey"
+        RED = "red", "Red"
+        AMBER = "amber", "Amber"
+        EMERALD = "emerald", "Green"
+        BLUE = "blue", "Blue"
+        VIOLET = "violet", "Violet"
+        PLUM = "plum", "Plum"
+
+    name = models.CharField(max_length=40, unique=True)
+    colour = models.CharField(max_length=10, choices=Colour.choices, default=Colour.SLATE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class Order(models.Model):
     class Status(models.TextChoices):
         # New website orders land here — an admin phones the customer, then
@@ -512,6 +545,10 @@ class Order(models.Model):
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING_PAYMENT
     )
+    # Admin-only markings. Removing a tag from the shop deletes the marking
+    # everywhere, which is the intent — an M2M, so no order data is touched.
+    tags = models.ManyToManyField(OrderTag, blank=True, related_name="orders")
+
     # False until an admin opens the Orders page — drives the "new orders" badge + sound.
     admin_seen = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

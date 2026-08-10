@@ -28,6 +28,7 @@ export function EntryForm({
   buyers,
   meta,
   editing,
+  initialMarks,
   onSaved,
   onCancel,
   onContactAdded,
@@ -38,6 +39,9 @@ export function EntryForm({
   buyers: Buyer[];
   meta: FinanceMeta | null;
   editing: Expense | Income | null;
+  /** Pre-marked orders for a NEW entry — used when the form is opened from an
+      order, where the mark is the whole reason the admin is here. */
+  initialMarks?: OrderMark[];
   onSaved: () => void;
   onCancel: () => void;
   /** A contact created from inside this form — refresh the page's lists. */
@@ -59,7 +63,8 @@ export function EntryForm({
   const [isCredit, setIsCredit] = useState<boolean>(
     (ex?.is_credit ?? inc?.is_credit) ?? false);
   const [reference, setReference] = useState(editing?.reference ?? "");
-  const [marks, setMarks] = useState<OrderMark[]>(editing?.order_marks ?? []);
+  const [marks, setMarks] = useState<OrderMark[]>(
+    editing?.order_marks ?? initialMarks ?? []);
   const [receipt, setReceipt] = useState<File | null>(null);
   // Part payment made at the moment of the deal — saved as the first instalment
   // so the admin never has to add the entry and then go find it again.

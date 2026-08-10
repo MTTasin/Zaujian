@@ -42,6 +42,7 @@ admin_router.register(r"combos", admin_api.AdminComboViewSet, basename="admin-co
 admin_router.register(r"combo-images", admin_api.AdminComboImageViewSet, basename="admin-combo-image")
 admin_router.register(r"combo-fields", admin_api.AdminComboFieldViewSet, basename="admin-combo-field")
 admin_router.register(r"orders", admin_api.AdminOrderViewSet, basename="admin-order")
+admin_router.register(r"order-tags", admin_api.AdminOrderTagViewSet, basename="admin-order-tag")
 admin_router.register(r"custom-requests", admin_api.AdminCustomRequestViewSet, basename="admin-custom")
 admin_router.register(r"gallery-photos", admin_api.AdminGalleryPhotoViewSet, basename="admin-gallery-photo")
 admin_router.register(r"gallery-tags", admin_api.AdminGalleryTagViewSet, basename="admin-gallery-tag")

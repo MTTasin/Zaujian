@@ -4,13 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  adminGet, adminPost, deleteOrder, markOrdersSeen, syncSteadfast,
+  adminGet, adminPost, deleteOrder, listOrderTags, markOrdersSeen, syncSteadfast,
   ORDER_DELETABLE, ORDER_SORTS, ORDER_STATUSES,
-  type AdminOrder,
+  type AdminOrderRow, type OrderTag,
 } from "@/lib/adminApi";
 import { PageHeader, Card, Select, TextInput, Table, Th, Td, AdminEmpty } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
 import { useCanWrite } from "@/components/admin/AdminAuthProvider";
+import { OrderTagManager, TagChip } from "@/components/admin/OrderTags";
 
 // Submission date + time in Bangladesh local time (server stores UTC).
 function fmtDate(iso: string): string {
@@ -44,7 +45,7 @@ export default function AdminOrders() {
   // View-only moderators get the same page with its write controls disabled —
   // the backend refuses them anyway; this stops the page lying about it.
   const canWrite = useCanWrite("orders");
-  const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const [orders, setOrders] = useState<AdminOrderRow[]>([]);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");   // debounced value actually sent
@@ -52,6 +53,13 @@ export default function AdminOrders() {
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  // Tags: the chip row filters, and the manager below it edits the vocabulary.
+  const [tags, setTags] = useState<OrderTag[]>([]);
+  const [tagFilter, setTagFilter] = useState<number | null>(null);
+  const [managingTags, setManagingTags] = useState(false);
+
+  const loadTags = () => listOrderTags().then(setTags).catch(() => setTags([]));
+  useEffect(() => { loadTags(); }, []);
 
   // Remember the admin's chosen sort across visits (sorting is a personal habit).
   useEffect(() => {
@@ -79,12 +87,13 @@ export default function AdminOrders() {
     if (filter) params.set("status", filter);
     if (query) params.set("q", query);
     if (sort) params.set("sort", sort);
+    if (tagFilter != null) params.set("tag", String(tagFilter));
     const qs = params.toString();
-    adminGet<AdminOrder[]>(`orders/${qs ? `?${qs}` : ""}`)
+    adminGet<AdminOrderRow[]>(`orders/${qs ? `?${qs}` : ""}`)
       .then(setOrders)
       .catch((e) => setError(e.message));
   }
-  useEffect(load, [filter, query, sort]);
+  useEffect(load, [filter, query, sort, tagFilter]);
 
   // Opening the Orders page acknowledges new orders → clears the badge + sound.
   useEffect(() => { markOrdersSeen().catch(() => {}); }, []);
@@ -92,7 +101,7 @@ export default function AdminOrders() {
   // Inline status change from the list. set_status→confirmed fires the Meta
   // Purchase (same as the detail page); it does NOT book Steadfast — that stays
   // on the detail-page Confirm action. Optimistic, reverts on failure.
-  async function changeStatus(o: AdminOrder, next: string) {
+  async function changeStatus(o: AdminOrderRow, next: string) {
     if (next === o.status) return;
     if (next === "confirmed" && !o.courier_submitted &&
         !confirm(`Mark ${o.uid} confirmed? This reports the Meta Purchase. (No Steadfast booking — use the order page for that.)`)) {
@@ -133,7 +142,7 @@ export default function AdminOrders() {
     }
   }
 
-  async function del(o: AdminOrder, e: React.MouseEvent) {
+  async function del(o: AdminOrderRow, e: React.MouseEvent) {
     e.stopPropagation();
     if (!confirm(`Permanently delete order ${o.uid}? This cannot be undone.`)) return;
     setError("");
@@ -179,7 +188,7 @@ export default function AdminOrders() {
             <TextInput
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search code, name, phone, email…"
+              placeholder="Search id, code, name, phone, email, tag…"
             />
           </div>
           <div className="sm:w-48">
@@ -225,6 +234,48 @@ export default function AdminOrders() {
             </button>
           ))}
         </div>
+
+        {/* Tags: click one to see only the orders carrying it. Typing the name
+            into the search box does the same thing, for a tag not shown here. */}
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+          <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Tags
+          </span>
+          {tags.length === 0 && (
+            <span className="text-xs text-slate-400">
+              None yet — open an order to tag it.
+            </span>
+          )}
+          {tags.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTagFilter(tagFilter === t.id ? null : t.id)}
+              aria-pressed={tagFilter === t.id}
+              className={`rounded-full transition ${tagFilter === t.id ? "ring-2 ring-plum/40" : "opacity-80 hover:opacity-100"}`}
+            >
+              <TagChip tag={t} />
+            </button>
+          ))}
+          {tagFilter != null && (
+            <button onClick={() => setTagFilter(null)} className="text-xs font-medium text-plum hover:underline">
+              clear
+            </button>
+          )}
+          {canWrite && (
+            <button
+              onClick={() => setManagingTags((v) => !v)}
+              className="ml-auto text-xs font-medium text-slate-500 hover:text-plum"
+            >
+              {managingTags ? "Done" : "Manage tags"}
+            </button>
+          )}
+        </div>
+
+        {managingTags && (
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <OrderTagManager onChanged={() => { loadTags(); load(); }} />
+          </div>
+        )}
       </Card>
 
       {error && <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">{error}</p>}
@@ -236,6 +287,11 @@ export default function AdminOrders() {
         <Table>
           <thead>
             <tr>
+              {/* The numeric row id — the number in the order's own URL, and
+                  what the owner quotes when talking to us about one order. */}
+              <Th onClick={toggle("oldest", "newest")} title="Sort by id (oldest first)">
+                ID{arrow("oldest", "newest")}
+              </Th>
               <Th onClick={toggle("code", "-code")} title="Sort by code">
                 Code{arrow("code", "-code")}
               </Th>
@@ -269,6 +325,7 @@ export default function AdminOrders() {
                 onClick={() => router.push(`/admin/orders/${o.id}`)}
                 className="order-row cursor-pointer"
               >
+                <Td className="font-mono text-xs text-slate-500">#{o.id}</Td>
                 <Td>
                   <Link
                     href={`/admin/orders/${o.id}`}
@@ -284,7 +341,14 @@ export default function AdminOrders() {
                   )}
                 </Td>
                 <Td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(o.created_at)}</Td>
-                <Td className="font-medium text-slate-900">{o.customer_name}</Td>
+                <Td className="font-medium text-slate-900">
+                  {o.customer_name}
+                  {o.tags.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {o.tags.map((t) => <TagChip key={t.id} tag={t} />)}
+                    </div>
+                  )}
+                </Td>
                 <Td>{o.phone}</Td>
                 <Td className="tabular-nums">৳ {o.total}</Td>
                 <Td>

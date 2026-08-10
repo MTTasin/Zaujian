@@ -4,6 +4,12 @@ import { API_BASE } from "./api";
 
 const TOKEN_KEY = "zaujain_admin_token";
 
+// Generous, because the backend runs on shared cPanel/Passenger: the first
+// request after an idle period pays for the app booting. Long enough to survive
+// a cold start, short enough that a dead request says so instead of hanging.
+const REQUEST_TIMEOUT_MS = 45_000;
+const UPLOAD_TIMEOUT_MS = 180_000;
+
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem(TOKEN_KEY);
@@ -35,9 +41,23 @@ async function req<T>(
   }
   // Admin data must always be fresh — without this the browser serves cached GETs
   // and newly created rows only appear after several manual refreshes.
-  const res = await fetch(`${API_BASE}/api/admin/${path}`, {
-    method, headers, body: payload, cache: "no-store",
-  });
+  //
+  // The timeout is the difference between "this is slow" and "the panel is
+  // broken": with none, a request the server never answers leaves the page on
+  // its spinner indefinitely, with nothing on screen saying so. Uploads get
+  // longer — a photo over a Bangladeshi mobile line is legitimately slow.
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/admin/${path}`, {
+      method, headers, body: payload, cache: "no-store",
+      signal: AbortSignal.timeout(isForm ? UPLOAD_TIMEOUT_MS : REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      throw new Error("The server did not answer in time. It may be waking up — try again.");
+    }
+    throw new Error("Could not reach the server. Check the connection and try again.");
+  }
   if (res.status === 401) {
     clearToken();
     // Never bounce the login page to itself — that is a full reload, and the
@@ -175,7 +195,66 @@ export interface AdminOrderItem {
   preview_image: string | null;
   config: ItemConfig;
   config_display: ConfigLine[];
+  /** Listing lines only: what is actually in the box. Null for a plain product. */
+  contents: { description: string; products: string[] } | null;
 }
+
+/**
+ * An admin-only marking on an order — "urgent", "gift wrap", "call before
+ * delivery". A row rather than text on the order, so renaming one renames it
+ * everywhere and searching it finds exactly the orders carrying it.
+ */
+export type TagColour = "slate" | "red" | "amber" | "emerald" | "blue" | "violet" | "plum";
+
+export interface OrderTag {
+  id: number;
+  name: string;
+  colour: TagColour;
+  order_count?: number;
+}
+
+export const TAG_COLOURS: TagColour[] =
+  ["slate", "red", "amber", "emerald", "blue", "violet", "plum"];
+
+/** Tailwind classes per swatch, written out because the class names must be
+    literal for the compiler to see them — a template string would be purged. */
+export const TAG_CLASSES: Record<TagColour, string> = {
+  slate: "bg-slate-100 text-slate-700 border-slate-200",
+  red: "bg-red-100 text-red-700 border-red-200",
+  amber: "bg-amber-100 text-amber-800 border-amber-200",
+  emerald: "bg-emerald-100 text-emerald-700 border-emerald-200",
+  blue: "bg-blue-100 text-blue-700 border-blue-200",
+  violet: "bg-violet-100 text-violet-700 border-violet-200",
+  plum: "bg-plum/10 text-plum border-plum/20",
+};
+
+export const listOrderTags = () => adminGet<OrderTag[]>("order-tags/");
+export const createOrderTag = (body: { name: string; colour?: TagColour }) =>
+  adminPost<OrderTag>("order-tags/", body);
+export const updateOrderTag = (id: number, body: { name?: string; colour?: TagColour }) =>
+  adminPatch<OrderTag>(`order-tags/${id}/`, body);
+export const deleteOrderTag = (id: number) => adminDelete(`order-tags/${id}/`);
+
+/** Replace an order's tags. `names` creates anything that does not exist yet. */
+export const setOrderTags = (orderId: number, body: { tags?: number[]; names?: string[] }) =>
+  adminPost<AdminOrder>(`orders/${orderId}/set_tags/`, body);
+
+/** One line as the item editor sends it. Omit a key to leave that part alone. */
+export interface OrderItemEdit {
+  /** Existing line — it keeps its options, photo and history. Omit to add a new one. */
+  id?: number;
+  product?: number | null;
+  combo?: number | null;
+  title?: string;
+  /** This order's price for the line. The catalogue is never touched. */
+  price?: string;
+  note?: string;
+  fields?: ItemConfigField[];
+}
+
+/** Replace an order's lines: swap items, retype details, reprice for this order. */
+export const editOrderItems = (orderId: number, items: OrderItemEdit[]) =>
+  adminPost<AdminOrder>(`orders/${orderId}/edit_items/`, { items });
 
 /**
  * One push from Steadfast's webhook. `delivery_status` carries a status;
@@ -239,10 +318,39 @@ export interface AdminOrder {
   status: string;
   status_display: string;
   created_at: string;
+  tags: OrderTag[];
   items: AdminOrderItem[];
   extra_consignments: ExtraConsignment[];
   /** Primary parcel's timeline; each extra carries its own under itself. */
   consignment_events: ConsignmentEvent[];
+}
+
+/**
+ * What the Orders LIST returns — scalars plus tags, no items.
+ *
+ * The full order is fetched when one is opened. Kept as its own type so the
+ * table cannot start reading a field the list does not send: that field would
+ * be `undefined` at runtime while looking perfectly typed.
+ */
+export interface AdminOrderRow {
+  id: number;
+  uid: string;
+  customer_name: string;
+  phone: string;
+  district: string;
+  subtotal: string;
+  delivery_charge: string;
+  total: string;
+  advance_received: string;
+  cod_amount: string;
+  payment_verified: boolean;
+  courier_submitted: boolean;
+  is_repeat_customer: boolean;
+  steadfast_status: string;
+  status: string;
+  status_display: string;
+  created_at: string;
+  tags: OrderTag[];
 }
 
 /**

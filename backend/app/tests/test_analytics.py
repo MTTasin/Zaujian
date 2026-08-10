@@ -335,3 +335,53 @@ class AdminAnalyticsApiTests(APITestCase):
                                           name="search_empty", props={"q": term})
         data = self.client.get("/api/admin/analytics/overview/").data
         self.assertEqual(data["empty_searches"][0], {"term": "পাঞ্জাবি", "count": 2})
+
+
+class CacheOutageTests(APITestCase):
+    """A dead or full cache must never take the analytics page down with it.
+
+    Redis here is 128MB with eviction and shared with sessions, so a key can
+    vanish and the server can refuse a connection outright. Everything cached in
+    this app is recomputable, so an outage is a slow page — never a 500. This is
+    the same rule services/cache.py already follows; the analytics module used to
+    call `cache` directly, which made this one screen the exception.
+    """
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_superuser("admin", password="x"))
+        cache.clear()
+
+    @staticmethod
+    def _dead_cache():
+        from unittest.mock import patch
+
+        def boom(*a, **k):
+            raise RuntimeError("redis down")
+
+        return patch.multiple("django.core.cache.cache", get=boom, set=boom)
+
+    def test_the_live_card_still_answers_without_a_cache(self):
+        VisitorSession.objects.create(session_id="s1", visitor_id="v1",
+                                      last_seen=timezone.now(), current_path="/cart")
+        with self._dead_cache():
+            resp = self.client.get("/api/admin/analytics/live/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["active"], 1)
+
+    def test_the_overview_still_answers_without_a_cache(self):
+        with self._dead_cache():
+            resp = self.client.get("/api/admin/analytics/overview/?days=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("trend", resp.data)
+
+    def test_collection_still_accepts_events_without_a_cache(self):
+        # The rate-limit check reads the cache; failing it open beats refusing
+        # real traffic, since the limit only exists to cap a flood.
+        self.client.force_authenticate(None)
+        with self._dead_cache():
+            resp = self.client.post(URL, {
+                "v": "v9", "s": "s9", "e": [{"n": "pageview", "p": "/"}],
+            }, format="json")
+        self.assertEqual(resp.status_code, 204)
+        self.assertTrue(AnalyticsEvent.objects.filter(visitor_id="v9").exists())

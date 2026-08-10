@@ -6,12 +6,16 @@ power, so every way of asking for more than the owner intended must be refused
 server-side, not merely hidden in the UI.
 """
 
+from datetime import timedelta
+
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-from app.models import StaffProfile
+from app.models import AdminPresence, StaffProfile
 from app.permissions import FULL, VIEW
 
 URL = "/api/admin/staff/"
@@ -148,3 +152,63 @@ class StaffGuardTests(TestCase):
         self.assertIn("orders", keys)
         self.assertNotIn("bot", keys)      # owner-only is never offered
         self.assertNotIn("staff", keys)
+
+
+class PresenceTests(TestCase):
+    """Who is using the panel, and when they last signed in.
+
+    Token auth never calls `django.contrib.auth.login()`, so nothing stamps
+    `last_login` unless the login view does it — the panel used to report
+    whenever the account last touched the Django admin instead.
+    """
+
+    def setUp(self):
+        cache.clear()          # the presence write is throttled through the cache
+        self.owner = User.objects.create_superuser("owner", "o@x.com", "Str0ng!pass9")
+        self.api = client_for(self.owner)
+
+    def test_logging_in_stamps_last_login(self):
+        self.assertIsNone(self.owner.last_login)
+        resp = APIClient().post(
+            "/api/admin/login/",
+            {"username": "owner", "password": "Str0ng!pass9"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.owner.refresh_from_db()
+        self.assertIsNotNone(self.owner.last_login)
+
+    def test_logging_in_marks_them_present(self):
+        APIClient().post(
+            "/api/admin/login/",
+            {"username": "owner", "password": "Str0ng!pass9"}, format="json",
+        )
+        self.assertTrue(AdminPresence.objects.filter(user=self.owner).exists())
+
+    def test_any_admin_read_refreshes_presence(self):
+        self.api.get("/api/admin/orders/")
+        first = AdminPresence.objects.get(user=self.owner).last_seen
+
+        cache.clear()          # skip past the throttle rather than sleeping
+        AdminPresence.objects.filter(user=self.owner).update(
+            last_seen=timezone.now() - timedelta(minutes=5),
+        )
+        self.api.get("/api/admin/orders/")
+        self.assertGreater(AdminPresence.objects.get(user=self.owner).last_seen, first)
+
+    def test_the_throttle_stops_a_write_per_poll(self):
+        self.api.get("/api/admin/orders/")
+        stamped = AdminPresence.objects.get(user=self.owner).last_seen
+        self.api.get("/api/admin/orders/")      # the 6s badge poll, in effect
+        self.assertEqual(AdminPresence.objects.get(user=self.owner).last_seen, stamped)
+
+    def test_an_anonymous_request_records_nobody(self):
+        APIClient().get("/api/admin/orders/")
+        self.assertEqual(AdminPresence.objects.count(), 0)
+
+    def test_the_staff_list_carries_last_seen_even_with_no_row(self):
+        never = User.objects.create_user("never", password="x", is_staff=True)
+        StaffProfile.objects.create(user=never, access={})
+        self.api.get(URL)      # the stamp lands after the response, so ask twice
+        rows = {r["username"]: r for r in self.api.get(URL).json()}
+        self.assertIsNone(rows["never"]["last_seen"])
+        self.assertIsNotNone(rows["owner"]["last_seen"])

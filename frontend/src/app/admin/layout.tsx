@@ -160,9 +160,21 @@ function AdminShell({ children }: { children: React.ReactNode }) {
         new Notification(title, { body });
       }
     };
+    // One tick at a time, and none at all while the tab is hidden.
+    //
+    // A fixed 6s interval with no guard is fine against a warm server and
+    // ruinous against a cold one: every tick queues another request on a
+    // Passenger worker that has not answered the last one, and the pile-up is
+    // what turns "slow" into "the panel never loads". A left-open tab polling
+    // all night is the same waste with no one watching.
+    let inFlight = false;
+    let failures = 0;
     const tick = async () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
       try {
         const d = await adminGet<{ waiting: number; unread: number; new_orders: number }>("chat-unread/");
+        failures = 0;
         setWaiting(d.waiting);
         setNewOrders(d.new_orders);
         if (d.waiting > prevWaiting.current) {
@@ -176,11 +188,30 @@ function AdminShell({ children }: { children: React.ReactNode }) {
         }
         prevWaiting.current = d.waiting;
         prevOrders.current = d.new_orders;
-      } catch { /* ignore */ }
+      } catch {
+        failures += 1;          // a struggling server is asked less, not more
+      } finally {
+        inFlight = false;
+      }
     };
     tick();
-    const iv = setInterval(tick, 6000);
-    return () => clearInterval(iv);
+    // Back off to 12s, 24s, 48s… capped at a minute, and straight back to 6s on
+    // the first success. Badges are worth a few seconds of lag; hammering a
+    // server that is already failing is not.
+    let iv: ReturnType<typeof setInterval>;
+    const schedule = () => {
+      const delay = Math.min(6000 * 2 ** Math.min(failures, 4), 60_000);
+      iv = setInterval(() => { tick(); if (failures) { clearInterval(iv); schedule(); } }, delay);
+    };
+    schedule();
+    // A tab that comes back to the front should be current immediately, not up
+    // to a minute later.
+    const onVisible = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [isLogin]);
 
   if (isLogin) return <>{children}</>;

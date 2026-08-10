@@ -456,14 +456,35 @@ class CartItemSerializer(serializers.ModelSerializer):
     category = serializers.SerializerMethodField()
     preview_image = serializers.SerializerMethodField()
     config_display = serializers.SerializerMethodField()
+    contents = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
         fields = [
             "id", "product", "combo", "product_name", "product_slug", "category",
-            "config", "config_display", "price_snapshot", "is_custom_request", "preview_image",
+            "config", "config_display", "contents", "price_snapshot",
+            "is_custom_request", "preview_image",
         ]
         read_only_fields = ["price_snapshot", "config"]
+
+    def get_contents(self, obj):
+        """What a listing line actually contains — the line's own name is just
+        "মেরুন কম্বো", which does not say what is going in the box.
+
+        Two independent answers, because neither alone is complete: the combo's
+        `description` is the authoritative contents the shop wrote (it names
+        things like বরমালা that are not Products at all), and `products` is what
+        the customizer links (which is what the customer configured). They are
+        labelled separately rather than merged, so nothing is implied that the
+        data does not actually say.
+        """
+        if not obj.combo_id:
+            return None
+        combo = obj.combo
+        return {
+            "description": combo.description or "",
+            "products": [p.name for p in combo.products.all()],
+        }
 
     def get_config_display(self, obj):
         return _config_display(obj, self.context.get("request"))

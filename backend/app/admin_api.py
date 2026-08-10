@@ -50,6 +50,7 @@ from .models import (
     ProductField,
     PushSubscription,
     ProductImage,
+    OrderTag,
     ProductSpec,
     SiteSettings,
     StaticDesign,
@@ -401,6 +402,84 @@ def _manual_lines(items):
     return [line for line in parsed if line is not None]
 
 
+# Option keys describe ONE product's configuration. Point the line at something
+# else and they are a description of a thing that is no longer being bought.
+_OPTION_KEYS = ("color", "corner", "center", "inside", "static", "dupatta", "combo_items")
+
+
+def _apply_item_line(item, raw):
+    """Write one admin-edited line onto a CartItem (unsaved). None = empty line.
+
+    Used by `edit_items` for both existing and new lines, so a swapped item and a
+    freshly added one obey exactly the same rules.
+    """
+    def cap(v):
+        return str(v or "").strip()[:MANUAL_TEXT_CAP]
+
+    cfg = dict(item.config or {})
+
+    # A link is only touched when the payload speaks about it, so an edit that
+    # only fixes a spelling cannot silently unlink the line from its listing.
+    relinking = "combo" in raw or "product" in raw
+    if relinking:
+        combo = (PrebuiltCombo.objects.filter(pk=raw.get("combo")).first()
+                 if raw.get("combo") else None)
+        product = (Product.objects.filter(pk=raw.get("product")).first()
+                   if raw.get("product") and combo is None else None)
+        changed = (combo.pk if combo else None) != item.combo_id or \
+                  (product.pk if product else None) != item.product_id
+        if changed:
+            for key in _OPTION_KEYS:
+                cfg.pop(key, None)
+            item.combo = combo
+            item.product = product
+    else:
+        combo, product, changed = item.combo, item.product, False
+
+    if "title" in raw:
+        title = cap(raw.get("title"))
+        if title:
+            cfg["title"] = title
+        else:
+            cfg.pop("title", None)
+
+    linked = combo or product
+    if not (cfg.get("title") or linked):
+        return None                       # a line with no name and no link is nothing
+
+    if "fields" in raw and isinstance(raw["fields"], list):
+        fields = []
+        for f in raw["fields"][:MANUAL_MAX_FIELDS]:
+            if not isinstance(f, dict):
+                continue
+            label, value = cap(f.get("label")), cap(f.get("value"))
+            if label or value:
+                fields.append({"label": label, "value": value})
+        if fields:
+            cfg["fields"] = fields
+        else:
+            cfg.pop("fields", None)
+
+    if "note" in raw:
+        note = cap(raw.get("note"))
+        if note:
+            cfg["note"] = note
+        else:
+            cfg.pop("note", None)
+
+    if item.pk is None:
+        cfg["manual"] = True              # typed by an admin, never by the customer
+
+    typed = raw.get("price")
+    if typed not in (None, ""):
+        item.price_snapshot = _dec(typed)          # this order's price, nothing else
+    elif changed or item.pk is None:
+        item.price_snapshot = _catalogue_price(combo, product)
+
+    item.config = cfg
+    return item
+
+
 def _create_manual_items(order, lines):
     """Write the parsed lines and return the subtotal."""
     subtotal = Decimal("0")
@@ -697,6 +776,27 @@ class ExtraConsignmentSerializer(serializers.ModelSerializer):
                   "recipient_address", "item_description", "created_at", "events"]
 
 
+class OrderTagSerializer(serializers.ModelSerializer):
+    order_count = serializers.IntegerField(source="orders.count", read_only=True)
+
+    class Meta:
+        model = OrderTag
+        fields = ["id", "name", "colour", "order_count"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("A tag needs a name.")
+        # Case-insensitive uniqueness: "Urgent" and "urgent" as two tags would
+        # split the very list the admin made the tag to gather.
+        clash = OrderTag.objects.filter(name__iexact=name)
+        if self.instance:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError("A tag with that name already exists.")
+        return name
+
+
 class AdminOrderSerializer(serializers.ModelSerializer):
     items = CartItemSerializer(many=True, read_only=True)
     total = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
@@ -704,6 +804,7 @@ class AdminOrderSerializer(serializers.ModelSerializer):
     full_address = serializers.CharField(read_only=True)
     extra_consignments = ExtraConsignmentSerializer(many=True, read_only=True)
     consignment_events = serializers.SerializerMethodField()
+    tags = OrderTagSerializer(many=True, read_only=True)
 
     def get_consignment_events(self, obj):
         """The PRIMARY parcel's timeline. Each extra carries its own under itself,
@@ -723,7 +824,43 @@ class AdminOrderSerializer(serializers.ModelSerializer):
             "fraud_check_result",
             "steadfast_consignment_id", "steadfast_tracking_code", "steadfast_status",
             "courier_submitted", "status", "status_display", "created_at",
-            "items", "extra_consignments", "consignment_events",
+            "items", "extra_consignments", "consignment_events", "tags",
+        ]
+        read_only_fields = fields
+
+
+class AdminOrderTagViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
+    """The tag vocabulary. Renaming here renames it on every order at once —
+    that is the reason tags are rows and not text typed onto each order."""
+
+    section = "orders"
+    queryset = OrderTag.objects.all()
+    serializer_class = OrderTagSerializer
+
+
+class AdminOrderListSerializer(serializers.ModelSerializer):
+    """The Orders LIST — scalars only, no items.
+
+    The full serializer walks every item's config to resolve option photos and
+    typed answers, which costs ~10 queries per order and buys the list nothing:
+    the table renders ten scalar fields and the dashboard seven. On an unpaginated
+    list that multiplied by every order ever placed, so the page got slower every
+    week until it read as "the panel is hanging". Opening one order still uses the
+    full serializer — there it is one row, and the detail is the point.
+    """
+
+    total = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    # One prefetch for the whole page — the list stays flat in queries.
+    tags = OrderTagSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            "id", "uid", "customer_name", "phone", "district",
+            "subtotal", "delivery_charge", "total", "advance_received", "cod_amount",
+            "payment_verified", "courier_submitted", "is_repeat_customer",
+            "steadfast_status", "status", "status_display", "created_at", "tags",
         ]
         read_only_fields = fields
 
@@ -736,7 +873,22 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
     VIEW_WRITES = ("mark_seen",)
     serializer_class = AdminOrderSerializer
     queryset = Order.objects.all().prefetch_related(
-        "items", "extra_consignments__events", "consignment_events")
+        "items", "extra_consignments__events", "consignment_events", "tags")
+
+    def get_serializer_class(self):
+        # Only the list is trimmed. Every action that answers with ONE order —
+        # retrieve, confirm, set_status, edit_items… — keeps the full shape the
+        # detail page renders, so no write action starts returning less than the
+        # page it came from expects.
+        if self._is_list():
+            return AdminOrderListSerializer
+        return AdminOrderSerializer
+
+    def _is_list(self):
+        # `action` is unset when the viewset is built directly (as the sorting
+        # tests do) — treat that as "not the list" so nothing silently thins.
+        return getattr(self, "action", None) == "list"
+
 
     # Only orders with no money/courier history may be hard-deleted; anything
     # further along must be cancelled instead (keeps the audit trail).
@@ -784,18 +936,35 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         from django.db.models import Case, F, IntegerField, Q, Value, When
 
         qs = super().get_queryset()
+        if self._is_list():
+            # The light list serializer reads no relation except tags, and
+            # prefetching items + consignments for every order ever placed is
+            # most of what made this page slow. One prefetch, not four.
+            qs = qs.prefetch_related(None).prefetch_related("tags")
         st = self.request.query_params.get("status")
         if st:
             qs = qs.filter(status=st)
+        # Tag filter: by id from the chip row, by name when typed/bookmarked.
+        tag = (self.request.query_params.get("tag") or "").strip()
+        if tag:
+            qs = qs.filter(tags__pk=tag) if tag.isdigit() else qs.filter(tags__name__iexact=tag)
         q = (self.request.query_params.get("q") or "").strip()
         if q:
+            # A digits-only term is ambiguous — it is far more often a phone
+            # number than a row id — so the id is an EXTRA match, never a
+            # replacement: searching "34" still finds phones containing 34.
+            by_id = Q(pk=int(q)) if q.isdigit() and len(q) < 10 else Q(pk__in=[])
             qs = qs.filter(
-                Q(uid__icontains=q)
+                by_id
+                | Q(uid__icontains=q)
                 | Q(customer_name__icontains=q)
                 | Q(phone__icontains=q)
                 | Q(whatsapp__icontains=q)
                 | Q(email__icontains=q)
-            )
+                # Searching a tag name finds the orders carrying it, which is
+                # most of why an admin tags an order in the first place.
+                | Q(tags__name__icontains=q)
+            ).distinct()
 
         sort = self.request.query_params.get("sort") or self.DEFAULT_SORT
         if sort not in self.SORTS:
@@ -1158,10 +1327,17 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
 
     @action(detail=True, methods=["post"])
     def edit_config(self, request, pk=None):
-        """Edit the customer-submitted TEXT in one order item's config: field answer
-        values, the special-instruction note, and combo line values. Option
-        selections (color/design/dupatta) and the price snapshot are left untouched,
-        so no re-pricing is needed. Values capped at 200 chars, matching cart_add."""
+        """Edit the customer-submitted TEXT in one order item's config: field answers,
+        the special-instruction note, and combo line values. Option selections
+        (color/design/dupatta) and the price snapshot are left untouched, so no
+        re-pricing is needed. Values capped at 200 chars, matching cart_add.
+
+        `fields` is the COMPLETE new list, so the admin can add a detail the
+        customer sent later ("nickname on the pen") or drop one that was a
+        mistake. An entry that omits `label` keeps the snapshotted label at that
+        position — the storefront's own labels are answers to a question the
+        customer was asked, and retyping them would rewrite history for no gain.
+        """
         order = self.get_object()
         item = order.items.filter(pk=request.data.get("item_id")).first()
         if not item:
@@ -1170,14 +1346,25 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         cfg = dict(item.config or {})
 
         def cap(v):
-            return str(v or "").strip()[:200]
+            return str(v or "").strip()[:MANUAL_TEXT_CAP]
 
-        # Field answers: labels stay snapshotted, only values change (positional).
         incoming_fields = request.data.get("fields")
-        if isinstance(incoming_fields, list) and isinstance(cfg.get("fields"), list):
-            for existing, incoming in zip(cfg["fields"], incoming_fields):
-                if isinstance(incoming, dict) and "value" in incoming:
-                    existing["value"] = cap(incoming.get("value"))
+        if isinstance(incoming_fields, list):
+            old = cfg.get("fields") if isinstance(cfg.get("fields"), list) else []
+            rebuilt = []
+            for i, incoming in enumerate(incoming_fields[:MANUAL_MAX_FIELDS]):
+                if not isinstance(incoming, dict):
+                    continue
+                label = (cap(incoming["label"]) if "label" in incoming
+                         else (old[i].get("label", "") if i < len(old) else ""))
+                value = (cap(incoming["value"]) if "value" in incoming
+                         else (old[i].get("value", "") if i < len(old) else ""))
+                if label or value:
+                    rebuilt.append({"label": label, "value": value})
+            if rebuilt:
+                cfg["fields"] = rebuilt
+            else:
+                cfg.pop("fields", None)
 
         # Combo item line values (positional, per product).
         incoming_ci = request.data.get("combo_items")
@@ -1199,6 +1386,92 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
 
         item.config = cfg
         item.save(update_fields=["config"])
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def set_tags(self, request, pk=None):
+        """Replace this order's tags. Body `{tags: [id, …]}` — the complete list,
+        so removing one is just leaving it out.
+
+        `{names: [...]}` is accepted too and creates what does not exist yet: the
+        admin is usually typing the tag at the moment they need it, and making
+        them go define it somewhere else first is how tagging stops happening.
+        """
+        order = self.get_object()
+        ids = request.data.get("tags")
+        names = request.data.get("names")
+        if ids is None and names is None:
+            return Response({"error": "Send tags (ids) or names"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        tags = list(OrderTag.objects.filter(pk__in=[i for i in (ids or []) if str(i).isdigit()]))
+        for raw in (names or []):
+            name = str(raw or "").strip()[:40]
+            if not name:
+                continue
+            tag = OrderTag.objects.filter(name__iexact=name).first()
+            if tag is None:
+                tag = OrderTag.objects.create(name=name)
+            if tag not in tags:
+                tags.append(tag)
+
+        order.tags.set(tags)
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def edit_items(self, request, pk=None):
+        """Rewrite the whole item list of a placed order — customers change their
+        minds after ordering, and until now only a fully-manual order could be
+        re-lined.
+
+        Body: {items: [{id?, product?, combo?, title?, price?, note?,
+                        fields?: [{label, value}]}, ...]}
+
+        A line carrying `id` is EDITED IN PLACE, which is the point: an untouched
+        website line keeps its option config (color/corner/center) and therefore
+        its photo and its option editor. A line with no `id` is new. An existing
+        line the payload omits is deleted. `price` is this order's price for that
+        line and nothing else — the catalogue is never written to, so the
+        snapshot guarantee holds in the direction that matters.
+        """
+        order = self.get_object()
+        payload = request.data.get("items")
+        if not isinstance(payload, list):
+            return Response({"error": "items must be a list"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        existing = {i.pk: i for i in order.items.all()}
+        kept, seen = [], set()
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                item_id = int(raw.get("id")) if raw.get("id") not in (None, "") else None
+            except (TypeError, ValueError):
+                item_id = None
+            item = existing.get(item_id)
+            if item_id is not None and item is None:
+                return Response({"error": f"Item {item_id} is not in this order"},
+                                status=status.HTTP_404_NOT_FOUND)
+            applied = _apply_item_line(item or CartItem(order=order, session_key="admin"), raw)
+            if applied is None:
+                continue                      # nothing in the line — silently dropped
+            kept.append(applied)
+            if item is not None:
+                seen.add(item.pk)
+
+        if not kept:
+            return Response({"error": "An order must keep at least one item"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        for item in kept:
+            item.save()
+        # Deleted last: if anything above failed, the order still has its lines.
+        order.items.exclude(pk__in=[i.pk for i in kept]).delete()
+
+        order.subtotal = sum((i.price_snapshot for i in kept), Decimal("0"))
+        order.cod_amount = order.compute_cod()
+        order.save()
         return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["post"])
@@ -1563,6 +1836,8 @@ def admin_dashboard(request):
     # month's takings handed to them on the landing page.
     sees_money = can_read(request.user, "finance")
     sees_orders = can_read(request.user, "orders")
+    # The card shows uid/customer/total/status, so it takes the light serializer
+    # too — the full one walked every item's option config for ten orders.
     recent = Order.objects.all()[:10] if sees_orders else Order.objects.none()
 
     # Money is business-wide now (Finance cash-book), not per order: this month's
@@ -1593,7 +1868,7 @@ def admin_dashboard(request):
         "month_expense": net["expense"],
         "month_net": net["net"],
         "dues_total": net["dues"],
-        "recent_orders": AdminOrderSerializer(
+        "recent_orders": AdminOrderListSerializer(
             recent, many=True, context={"request": request}
         ).data,
         "visitors_today": stat.visitors if stat else 0,

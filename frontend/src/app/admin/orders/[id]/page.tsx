@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   adminGet, adminPost, ORDER_STATUSES,
   listColorOptions, listToppingOptions, listInsideOptions, listStaticOptions, listDupattaOptions,
@@ -13,7 +13,14 @@ import {
   type AdminInsideOption, type AdminStaticOption, type AdminDupattaOption,
 } from "@/lib/adminApi";
 import { CourierGrading, type CourierStat } from "@/components/admin/CourierGrading";
-import { getOrderFinance } from "@/lib/financeApi";
+import { OrderItemsEditor } from "@/components/admin/OrderItemsEditor";
+import { OrderTagEditor } from "@/components/admin/OrderTags";
+import { useCanWrite } from "@/components/admin/AdminAuthProvider";
+import {
+  getFinanceMeta, getOrderFinance, listBuyers, listFinanceCategories, listSuppliers,
+  type Buyer, type FinanceCategory, type FinanceMeta, type Supplier,
+} from "@/lib/financeApi";
+import { EntryForm } from "@/components/admin/finance/EntryForm";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
 import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, StatusPill, Loading } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
@@ -32,6 +39,10 @@ export default function AdminOrderDetail() {
     delivery_charge: "", advance_received: "",
   });
   const [thanaOther, setThanaOther] = useState("");
+  // Re-lining the order (swap an item, change a price, add a line) — the Items
+  // panel turns into the editor rather than opening a second place to edit.
+  const [itemsEditing, setItemsEditing] = useState(false);
+  const canWrite = useCanWrite("orders");
   const [editItems, setEditItems] = useState<{
     title: string; price: string;
     product: number | null; combo: number | null;
@@ -114,12 +125,11 @@ export default function AdminOrderDetail() {
     combo_items: ItemConfigComboItem[];
   }>({ fields: [], note: "", combo_items: [] });
 
+  // Every ordinary line can be edited now, not just one that already carries an
+  // answer: the editor can ADD a detail, so "has none yet" is exactly the case
+  // that used to be locked out.
   function itemHasEditableText(it: AdminOrderItem) {
-    const cfg = it.config || {};
-    const hasFields = (cfg.fields?.length ?? 0) > 0;
-    const hasNote = !!cfg.note;
-    const hasComboLines = (cfg.combo_items ?? []).some((ci) => (ci.lines?.length ?? 0) > 0);
-    return hasFields || hasNote || hasComboLines;
+    return !it.is_custom_request;
   }
 
   function startConfigEdit(it: AdminOrderItem) {
@@ -432,9 +442,30 @@ export default function AdminOrderDetail() {
           </div>
         )}
 
-        <OrderFinanceMarks orderId={order.id} />
+        <Panel title="Tags">
+          <p className="mb-2 text-xs text-slate-400">
+            Your own markings — searchable from the Orders list. Not shown to the customer.
+          </p>
+          <OrderTagEditor order={order} canWrite={canWrite} onChange={setOrder} />
+        </Panel>
 
-        <Panel title="Items">
+        <OrderFinanceMarks order={order} />
+
+        <Panel
+          title="Items"
+          action={!itemsEditing && canWrite ? (
+            <AdminButton variant="secondary" icon="edit" onClick={() => { setMsg(""); setError(""); setItemsEditing(true); }} className="min-h-8 px-3 text-xs">
+              Edit items
+            </AdminButton>
+          ) : null}
+        >
+          {itemsEditing ? (
+            <OrderItemsEditor
+              order={order}
+              onCancel={() => setItemsEditing(false)}
+              onSaved={(updated) => { setOrder(updated); setItemsEditing(false); setMsg("Items updated"); }}
+            />
+          ) : (
           <div className="space-y-3">
             {order.items.map((it) => (
               <div key={it.id} className="flex gap-3 border-b border-slate-100 pb-3 last:border-0 last:pb-0">
@@ -443,6 +474,7 @@ export default function AdminOrderDetail() {
                 </div>
                 <div className="flex-1 text-sm">
                   <div className="font-medium text-slate-900">{it.product_name}</div>
+                  <ComboContents contents={it.contents} />
                   {(it.config_display?.length ?? 0) > 0 ? (
                     <>
                       {/* Picked designs stay tiles — the picture IS the answer. */}
@@ -467,17 +499,57 @@ export default function AdminOrderDetail() {
                   {itemHasEditableText(it) && (
                     configEditItemId === it.id ? (
                       <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        {/* Label AND value are editable, and rows can be added or
+                            dropped: details keep arriving after the order (a
+                            nickname for the pen, a corrected date). A row the
+                            customer filled in keeps its snapshotted label unless
+                            it is deliberately retyped here. */}
                         {configForm.fields.map((f, i) => (
-                          <Field key={`f-${i}`} label={f.label}>
-                            <TextInput
-                              value={f.value}
-                              onChange={(e) => setConfigForm((s) => ({
-                                ...s,
-                                fields: s.fields.map((x, idx) => idx === i ? { ...x, value: e.target.value } : x),
+                          <div key={`f-${i}`} className="flex items-end gap-2">
+                            <div className="w-1/3">
+                              <Field label={i === 0 ? "Detail" : ""}>
+                                <TextInput
+                                  placeholder="e.g. বরের নাম"
+                                  value={f.label}
+                                  onChange={(e) => setConfigForm((s) => ({
+                                    ...s,
+                                    fields: s.fields.map((x, idx) => idx === i ? { ...x, label: e.target.value } : x),
+                                  }))}
+                                />
+                              </Field>
+                            </div>
+                            <div className="flex-1">
+                              <Field label={i === 0 ? "What the customer wants" : ""}>
+                                <TextInput
+                                  value={f.value}
+                                  onChange={(e) => setConfigForm((s) => ({
+                                    ...s,
+                                    fields: s.fields.map((x, idx) => idx === i ? { ...x, value: e.target.value } : x),
+                                  }))}
+                                />
+                              </Field>
+                            </div>
+                            <button
+                              type="button"
+                              aria-label={`Remove ${f.label || "detail"}`}
+                              onClick={() => setConfigForm((s) => ({
+                                ...s, fields: s.fields.filter((_, idx) => idx !== i),
                               }))}
-                            />
-                          </Field>
+                              className="mb-1 flex h-10 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600"
+                            >
+                              <Icon name="trash" size={14} />
+                            </button>
+                          </div>
                         ))}
+                        <button
+                          type="button"
+                          onClick={() => setConfigForm((s) => ({
+                            ...s, fields: [...s.fields, { label: "", value: "" }],
+                          }))}
+                          className="text-sm font-medium text-plum hover:underline"
+                        >
+                          + Add detail
+                        </button>
                         {configForm.combo_items.map((ci, ciIdx) => (
                           ci.lines.map((ln, lnIdx) => (
                             <Field key={`c-${ciIdx}-${lnIdx}`} label={`${ci.product} — ${ln.label}`}>
@@ -595,6 +667,7 @@ export default function AdminOrderDetail() {
               </div>
             ))}
           </div>
+          )}
         </Panel>
 
         <Panel title="Payment">
@@ -971,39 +1044,139 @@ function Timeline({ events }: { events: ConsignmentEvent[] }) {
   );
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+function Panel({ title, action, children }: {
+  title: string; action?: React.ReactNode; children: React.ReactNode;
+}) {
   return (
     <Card className="p-4">
-      <h2 className="mb-2 font-semibold text-slate-900">{title}</h2>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h2 className="font-semibold text-slate-900">{title}</h2>
+        {action}
+      </div>
       {children}
     </Card>
   );
 }
 
+/**
+ * What a listing line actually contains. "মেরুন কম্বো" on its own does not tell
+ * the packing desk what goes in the box.
+ *
+ * The shop's own description and the linked customizer products are shown as two
+ * separate answers because that is what they are: the description names things
+ * (বরমালা, স্ট্যাম্প প্যাড) that were never Products, and the links are only what the
+ * customizer maps. Merging them would invent a contents list neither one states.
+ */
+function ComboContents({ contents }: { contents: AdminOrderItem["contents"] }) {
+  if (!contents) return null;
+  const { description, products } = contents;
+  if (!description && products.length === 0) return null;
+  return (
+    <div className="mt-1 space-y-1 text-xs">
+      {description && <p className="whitespace-pre-line text-slate-500">{description}</p>}
+      {products.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-slate-400">Customizable items:</span>
+          {products.map((name) => (
+            <span key={name} className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-600">
+              {name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Finance entries MARKED against this order. A mark is a note about what money
 // was for — nothing is allocated to the order, so there is no per-order profit.
-function OrderFinanceMarks({ orderId }: { orderId: number }) {
+//
+// Spending can also be ENTERED here: the materials for a specific order get
+// bought while looking at that order, and making the admin retype the order code
+// over in Finance is how marks stop being added at all. It writes a normal
+// cash-book Expense through the shared form — same rules, same validation, one
+// place where money is defined.
+function OrderFinanceMarks({ order }: { order: AdminOrder }) {
+  const orderId = order.id;
   const [data, setData] = useState<Awaited<ReturnType<typeof getOrderFinance>> | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [lists, setLists] = useState<{
+    categories: FinanceCategory[]; suppliers: Supplier[]; buyers: Buyer[]; meta: FinanceMeta | null;
+  } | null>(null);
+  const [listError, setListError] = useState("");
+  const canWriteFinance = useCanWrite("finance");
 
-  useEffect(() => {
+  const load = useCallback(() => {
     getOrderFinance(orderId).then(setData).catch(() => {});
   }, [orderId]);
+  useEffect(load, [load]);
 
-  if (!data || (!data.expenses.length && !data.incomes.length)) return null;
+  // The cash-book's own reference data, fetched only once the admin asks to add
+  // something — an order page should not pay for it on every visit.
+  useEffect(() => {
+    if (!adding || lists) return;
+    Promise.all([
+      listFinanceCategories("expense"), listSuppliers(), listBuyers(), getFinanceMeta(),
+    ])
+      .then(([categories, suppliers, buyers, meta]) =>
+        setLists({ categories, suppliers, buyers, meta }))
+      .catch((e) => setListError(e instanceof Error ? e.message : "Could not load Finance"));
+  }, [adding, lists]);
+
+  const hasMarks = !!data && (data.expenses.length > 0 || data.incomes.length > 0);
+  if (!hasMarks && !canWriteFinance) return null;
 
   return (
-    <Panel title="Money marked against this order">
+    <Panel
+      title="Money marked against this order"
+      action={canWriteFinance && !adding ? (
+        <AdminButton variant="secondary" icon="plus" onClick={() => setAdding(true)} className="min-h-8 px-3 text-xs">
+          Add spending
+        </AdminButton>
+      ) : null}
+    >
       <p className="mb-2 text-xs text-slate-400">
         A reference only — these amounts are not costed against the order.
       </p>
+
+      {adding && (
+        <div className="mb-3">
+          {listError && <p className="mb-2 rounded-lg bg-red-50 p-2 text-sm text-red-600">{listError}</p>}
+          {!lists && !listError ? (
+            <p className="text-sm text-slate-400">Loading Finance…</p>
+          ) : lists ? (
+            <EntryForm
+              kind="expense"
+              categories={lists.categories}
+              suppliers={lists.suppliers}
+              buyers={lists.buyers}
+              meta={lists.meta}
+              editing={null}
+              initialMarks={[{
+                id: order.id, uid: order.uid, customer_name: order.customer_name,
+                phone: order.phone, total: order.total, status: order.status,
+                created_at: order.created_at,
+              }]}
+              onSaved={() => { setAdding(false); load(); }}
+              onCancel={() => setAdding(false)}
+              onContactAdded={() => setLists(null)}
+            />
+          ) : null}
+        </div>
+      )}
+
+      {!hasMarks && !adding && (
+        <p className="text-sm text-slate-400">Nothing marked against this order yet.</p>
+      )}
+
       <div className="space-y-1">
-        {data.expenses.map((e) => (
+        {(data?.expenses ?? []).map((e) => (
           <div key={`e${e.id}`} className="flex justify-between gap-4 text-sm">
             <span className="text-slate-500">{e.date} · {e.category_name}{e.description ? ` — ${e.description}` : ""}</span>
             <span className="whitespace-nowrap text-red-600">− ৳ {e.total_out}</span>
           </div>
         ))}
-        {data.incomes.map((i) => (
+        {(data?.incomes ?? []).map((i) => (
           <div key={`i${i.id}`} className="flex justify-between gap-4 text-sm">
             <span className="text-slate-500">{i.date} · {i.category_name}{i.description ? ` — ${i.description}` : ""}</span>
             <span className="whitespace-nowrap text-emerald-600">+ ৳ {i.net_amount}</span>
