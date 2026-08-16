@@ -91,8 +91,13 @@ body {
   .challan-sheet {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    page-break-after: always;
-    break-after: page;
+  }
+  /* Break BETWEEN sheets, never after the last one — a trailing break-after
+     ejects an extra blank sheet, which on a one-parcel challan is the whole
+     second page. */
+  .challan-sheet + .challan-sheet {
+    page-break-before: always;
+    break-before: page;
   }
 }
 

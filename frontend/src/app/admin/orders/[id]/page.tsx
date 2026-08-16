@@ -22,6 +22,7 @@ import {
 } from "@/lib/financeApi";
 import { EntryForm } from "@/components/admin/finance/EntryForm";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
+import { SITE_URL } from "@/lib/seo";
 import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, StatusPill, Loading } from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
 
@@ -334,14 +335,19 @@ export default function AdminOrderDetail() {
   return (
     <div>
       <PageHeader
-        title={`Order ${order.uid}`}
+        // The number in the URL and in the Orders list's first column — that is
+        // what the admin says out loud. The uid is the CUSTOMER's code, so it
+        // rides along underneath rather than replacing it.
+        title={`Order #${order.id}`}
+        subtitle={`Customer code ${order.uid}${order.created_at ? ` · Placed ${formatPlaced(order.created_at)}` : ""}`}
         action={
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {order.is_repeat_customer && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-gold/15 px-3 py-1 text-xs font-semibold text-gold">
                 <Icon name="star" size={14} fill /> Repeat customer
               </span>
             )}
+            <CopyTrackingLink uid={order.uid} />
             {!editing && (
               <AdminButton variant="secondary" icon="edit" onClick={startEdit}>Edit</AdminButton>
             )}
@@ -425,8 +431,11 @@ export default function AdminOrderDetail() {
           <div className="grid gap-4 md:grid-cols-2">
             <Panel title="Customer">
               <Row k="Name" v={order.customer_name} />
-              <Row k="Phone" v={order.phone} />
-              <Row k="WhatsApp" v={order.whatsapp || "—"} />
+              {/* Phone + WhatsApp are the two things typed into another app all
+                  day (dialer, WhatsApp, courier form) — big enough to read off
+                  the screen, and copyable so they are never re-typed. */}
+              <CopyRow k="Phone" v={order.phone} />
+              <CopyRow k="WhatsApp" v={order.whatsapp} />
               <Row k="Email" v={order.email || "—"} />
               <Row k="Address" v={order.full_address || order.address} />
             </Panel>
@@ -957,6 +966,42 @@ export default function AdminOrderDetail() {
   );
 }
 
+// When the order came in — date AND time: two orders from the same person on the
+// same day are told apart by the clock, and "placed 20 minutes ago" changes how
+// fast the confirming call has to happen.
+function formatPlaced(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-GB", {
+    day: "numeric", month: "short", year: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
+/**
+ * The customer's own tracking page, ready to paste into WhatsApp. The customer
+ * never sees the numeric id, so this is built from the uid — the same link the
+ * order emails carry.
+ */
+function CopyTrackingLink({ uid }: { uid: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    // The admin panel is served from the storefront's own domain, so its origin
+    // IS the customer-facing site; SITE_URL only covers a non-browser render.
+    const base = typeof window !== "undefined" ? window.location.origin : SITE_URL;
+    try {
+      await navigator.clipboard.writeText(`${base}/track/${uid}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard unavailable (http, old browser) */ }
+  }
+  return (
+    <AdminButton variant="secondary" icon={copied ? "check" : "copy"} onClick={copy}>
+      {copied ? "Link copied" : "Copy tracking link"}
+    </AdminButton>
+  );
+}
+
 /**
  * The customer's typed answers, one per row, each copyable — these get pasted
  * into the design file one at a time, so a tile grid made the owner re-type them.
@@ -1197,6 +1242,41 @@ function Row({ k, v }: { k: string; v: string }) {
     <div className="flex justify-between gap-4 py-0.5 text-sm">
       <span className="text-slate-500">{k}</span>
       <span className="text-right text-slate-800">{v}</span>
+    </div>
+  );
+}
+
+// A phone number: shown large and copied in one tap.
+function CopyRow({ k, v }: { k: string; v: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!v) return <Row k={k} v="—" />;
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(v);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable (http, old browser) */ }
+  }
+  return (
+    <div className="flex items-center justify-between gap-4 py-0.5 text-sm">
+      <span className="text-slate-500">{k}</span>
+      <div className="flex items-center gap-2">
+        <a
+          href={`tel:${v.replace(/\s/g, "")}`}
+          className="select-all font-mono text-lg font-semibold tracking-wide text-slate-900 tabular-nums hover:text-plum"
+        >
+          {v}
+        </a>
+        <button
+          type="button"
+          onClick={copy}
+          title={`Copy ${k.toLowerCase()}`}
+          aria-label={`Copy ${k.toLowerCase()}`}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-plum"
+        >
+          <Icon name={copied ? "check" : "copy"} size={16} />
+        </button>
+      </div>
     </div>
   );
 }

@@ -436,30 +436,36 @@ function RowActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => 
   );
 }
 
-// A credit row records how the DEAL was made; it is never itself "paid off",
-// because a CreditPayment comes off the contact's whole balance and is never
-// allocated to one invoice (see finance_api.py). So the only truthful thing to
-// show per row is where that CONTACT now stands — settled or still owing.
-function CreditCell({ isCredit, contact, balance }: {
-  isCredit: boolean; contact: string; balance: number | null;
+// What THIS row still owes, not what its contact owes in total. A payment is
+// still never tied to one invoice (see finance_api.py) — the backend derives the
+// row's share oldest-credit-first, so a payment settles the earliest purchase
+// still owing and leftover money waits for the next one. Printing the contact's
+// whole balance on every row, as this used to, made a purchase paid off weeks
+// ago read as outstanding on every visit.
+function CreditCell({ isCredit, contact, remaining, balance }: {
+  isCredit: boolean; contact: string; remaining: number | null; balance: number | null;
 }) {
   if (!isCredit) return <span className="text-slate-300">—</span>;
-  if (balance === null) {
+  if (remaining === null) {
+    // No contact on the row (deleted supplier/buyer) — there is no running
+    // account to place it in, so the deal is all we can honestly report.
     return <span className="font-semibold text-amber-700">on credit</span>;
   }
-  if (balance > 0) {
+  const total = balance === null ? null
+    : balance > 0 ? `${contact} owes ${taka(balance)} in total.`
+    : balance < 0 ? `${contact} is fully settled and holding an advance of ${taka(-balance)}.`
+    : `${contact} has no outstanding balance.`;
+  if (remaining > 0) {
     return (
       <span className="font-semibold text-amber-700"
-            title={`${contact} still owes ${taka(balance)} in total (all credit entries together).`}>
-        on credit · {taka(balance)} left
+            title={`${taka(remaining)} of this entry is still unpaid. ${total ?? ""}`.trim()}>
+        on credit · {taka(remaining)} left
       </span>
     );
   }
   return (
     <span className="font-semibold text-emerald-600"
-          title={balance < 0
-            ? `${contact} is fully settled and holding an advance of ${taka(-balance)}.`
-            : `${contact} has no outstanding balance — every credit entry for them is covered.`}>
+          title={`This entry is covered by payments made. ${total ?? ""}`.trim()}>
       settled
     </span>
   );
@@ -507,6 +513,7 @@ function ExpenseTable({ rows, suppliers, onEdit, onDelete }: {
             <Td className="capitalize">{r.account}</Td>
             <Td>
               <CreditCell isCredit={r.is_credit} contact={r.supplier_name || "This supplier"}
+                          remaining={r.credit_remaining === null ? null : Number(r.credit_remaining)}
                           balance={r.supplier != null && dues.has(r.supplier)
                             ? dues.get(r.supplier)! : null} />
             </Td>
@@ -556,6 +563,7 @@ function IncomeTable({ rows, buyers, onEdit, onDelete }: {
             <Td className="capitalize">{r.account}</Td>
             <Td>
               <CreditCell isCredit={r.is_credit} contact={r.buyer_name || "This buyer"}
+                          remaining={r.credit_remaining === null ? null : Number(r.credit_remaining)}
                           balance={r.buyer != null && owed.has(r.buyer)
                             ? owed.get(r.buyer)! : null} />
             </Td>

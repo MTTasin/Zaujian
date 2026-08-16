@@ -133,6 +133,20 @@ function AdminShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => setMobileOpen(false), [pathname]);
 
+  // The mobile nav overlays the page, so the page behind it must not scroll
+  // under the finger, and Escape must close it like any other dialog.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMobileOpen(false);
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
+
   // Dark mode is the admin's own setting, not the OS's — the storefront has no
   // dark theme, so the attribute is stripped the moment this layout unmounts.
   useEffect(() => {
@@ -314,15 +328,37 @@ function AdminShell({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           </div>
+          {/* Mobile nav — an OVERLAY, not a block in the flow. Rendered inline it
+              pushed the whole page down by its own height (17 items ≈ a screen
+              and a half), so opening the menu buried the page header. It floats
+              over the content instead and closes on tap-away, Escape, or a route
+              change (the effect above). */}
           {mobileOpen && (
-            <div className="border-b border-slate-200 bg-white p-3 md:hidden">
-              <nav className="flex flex-col gap-1">{visibleNav.map(navItem)}</nav>
-              <button
-                onClick={logout}
-                className="mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50"
-              >
-                <Icon name="logout" size={18} /> Log out
-              </button>
+            <div className="fixed inset-0 z-40 md:hidden print:hidden">
+              <div
+                onClick={() => setMobileOpen(false)}
+                aria-hidden
+                className="absolute inset-0 bg-slate-900/50"
+              />
+              <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-slate-200 bg-white p-3 shadow-2xl">
+                <div className="mb-3 flex items-center justify-between pl-1 pt-1">
+                  {brand}
+                  <button
+                    onClick={() => setMobileOpen(false)}
+                    aria-label="Close menu"
+                    className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
+                  >
+                    <Icon name="x" size={22} />
+                  </button>
+                </div>
+                <nav className="flex flex-col gap-1">{visibleNav.map(navItem)}</nav>
+                <button
+                  onClick={logout}
+                  className="mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50"
+                >
+                  <Icon name="logout" size={18} /> Log out
+                </button>
+              </div>
             </div>
           )}
 

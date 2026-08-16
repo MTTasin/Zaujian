@@ -54,10 +54,12 @@ export default function ChallanPage() {
         </Link>
       </div>
 
-      {/* Sticker — a full A4 page (210×297mm minus the 6mm print margin). */}
+      {/* Sticker — a full A4 page (210×297mm minus the 6mm print margin).
+          Height is 283mm, not the full 285mm printable height: an exact fit
+          leaves zero slack, so sub-pixel rounding spills onto a second sheet. */}
       <div
         className="challan-sheet relative mx-auto flex max-w-full flex-col overflow-hidden bg-white px-10 pt-10 pb-0"
-        style={{ fontFamily: "'Times New Roman', Times, serif", width: "198mm", height: "285mm" }}
+        style={{ fontFamily: "'Times New Roman', Times, serif", width: "198mm", height: "283mm" }}
       >
         {/* Brand watermark, sitting behind the address block. */}
         <div className="pointer-events-none absolute left-0 right-0 top-4 flex justify-center">

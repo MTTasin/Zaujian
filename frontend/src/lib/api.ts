@@ -286,6 +286,8 @@ export interface ShopInfo {
   bkash_number: string;
   nagad_number: string;
   whatsapp_number: string;
+  /** May be several comma-separated numbers. */
+  contact_phone?: string;
 }
 
 export const getShopInfo = () => apiGet<ShopInfo>("shop-info/");
@@ -322,7 +324,13 @@ export interface OrderDetail {
   uid: string;
   customer_name: string;
   phone: string;
+  whatsapp: string;
+  division: string;
+  district: string;
+  thana: string;
+  address: string;
   full_address: string;
+  created_at: string;
   subtotal: string;
   delivery_charge: string;
   total: string;
@@ -334,6 +342,7 @@ export interface OrderDetail {
   status: string;
   status_display: string;
   steadfast_tracking_code?: string;
+  steadfast_status?: string;
   items: CartLine[];
 }
 

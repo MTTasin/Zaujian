@@ -1,5 +1,6 @@
 """Admin Orders list sorting (?sort=) — default workflow order + every option."""
 
+from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -9,7 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from app.admin_api import AdminOrderViewSet
-from app.models import CartItem, Order, Product
+from app.models import CartItem, Expense, FinanceCategory, Income, Order, Product
 
 
 def _qs(sort=None):
@@ -114,7 +115,7 @@ class OrderListCostTests(APITestCase):
         row = self.client.get("/api/admin/orders/").json()[0]
         for field in ("uid", "customer_name", "phone", "total", "status",
                       "status_display", "payment_verified", "courier_submitted",
-                      "is_repeat_customer", "created_at"):
+                      "is_repeat_customer", "created_at", "marked_count"):
             self.assertIn(field, row)
         self.assertNotIn("items", row)          # the expensive part, unread here
 
@@ -124,3 +125,78 @@ class OrderListCostTests(APITestCase):
         detail = self.client.get(f"/api/admin/orders/{order.id}/").json()
         self.assertIn("items", detail)
         self.assertIn("config_display", detail["items"][0])
+
+
+class MarkedCountTests(APITestCase):
+    """`marked_count` — how many cash-book rows are marked against an order.
+
+    It is annotated, not counted per row: the Orders list is unpaginated, so a
+    per-order query is exactly the shape of the slowness that made this list
+    take a light serializer in the first place.
+    """
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_superuser("admin", password="x"))
+        self.order = Order.objects.create(
+            customer_name="C", phone="01700000000",
+            subtotal=Decimal("1200"), delivery_charge=Decimal("120"))
+        self.other = Order.objects.create(
+            customer_name="D", phone="01700000001",
+            subtotal=Decimal("900"), delivery_charge=Decimal("120"))
+
+    def _category(self, kind):
+        # (name, kind) is unique — number them so a test may mark many entries.
+        self._n = getattr(self, "_n", 0) + 1
+        return FinanceCategory.objects.create(name=f"{kind}{self._n}", kind=kind)
+
+    def _mark_expense(self, order, amount="100"):
+        exp = Expense.objects.create(category=self._category("expense"),
+                                     amount=Decimal(amount), date=date(2026, 8, 1))
+        exp.orders.add(order)
+        return exp
+
+    def _mark_income(self, order, amount="500"):
+        inc = Income.objects.create(category=self._category("income"),
+                                    amount=Decimal(amount), date=date(2026, 8, 1))
+        inc.orders.add(order)
+        return inc
+
+    def _rows(self):
+        resp = self.client.get("/api/admin/orders/")
+        self.assertEqual(resp.status_code, 200)
+        return {r["id"]: r["marked_count"] for r in resp.json()}
+
+    def test_an_unmarked_order_counts_zero(self):
+        self.assertEqual(self._rows()[self.order.id], 0)
+
+    def test_expenses_and_incomes_both_count_and_do_not_leak_across_orders(self):
+        self._mark_expense(self.order)
+        self._mark_expense(self.order, "200")
+        self._mark_income(self.order)
+        self._mark_income(self.other)
+        rows = self._rows()
+        # 2 expenses + 1 income. Joining two M2Ms without distinct=True would
+        # multiply these into 2×1 per side and report 4 here.
+        self.assertEqual(rows[self.order.id], 3)
+        self.assertEqual(rows[self.other.id], 1)
+
+    def test_counting_costs_no_extra_query_per_order(self):
+        for i in range(4):
+            self._mark_expense(self.order, str(100 + i))
+        self.client.get("/api/admin/orders/")            # warm up
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get("/api/admin/orders/")
+        few = len(ctx.captured_queries)
+        for i in range(4):
+            self._mark_expense(self.other, str(200 + i))
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get("/api/admin/orders/")
+        self.assertEqual(few, len(ctx.captured_queries))
+
+    def test_sorting_by_marked_puts_the_marked_orders_first(self):
+        self._mark_expense(self.other)
+        ids = [r["id"] for r in self.client.get("/api/admin/orders/?sort=marked").json()]
+        self.assertEqual(ids[0], self.other.id)
+        ids = [r["id"] for r in self.client.get("/api/admin/orders/?sort=unmarked").json()]
+        self.assertEqual(ids[0], self.order.id)

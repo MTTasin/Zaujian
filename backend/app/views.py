@@ -171,6 +171,8 @@ def _shop_info_payload():
         "bkash_number": settings.SHOP["BKASH_NUMBER"],
         "nagad_number": settings.SHOP["NAGAD_NUMBER"],
         "whatsapp_number": settings.SHOP["WHATSAPP_NUMBER"],
+        # May hold several comma-separated numbers — the storefront calls the first.
+        "contact_phone": settings.SHOP["CONTACT_PHONE"],
     }
 
 

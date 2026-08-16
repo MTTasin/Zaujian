@@ -90,6 +90,10 @@ export interface Expense {
   supplier: number | null;
   supplier_name: string;
   is_credit: boolean;
+  /** What THIS credit row still owes, oldest-credit-first. Null when the row is
+   *  not on credit, or its supplier was deleted. Display only — the money truth
+   *  is still the contact's running balance. */
+  credit_remaining: string | null;
   reference: string;
   receipt: string | null;
   orders: number[];
@@ -112,6 +116,8 @@ export interface Income {
   buyer: number | null;
   buyer_name: string;
   is_credit: boolean;
+  /** What THIS credit row still owes — see the same field on Expense. */
+  credit_remaining: string | null;
   orders: number[];
   order_marks: OrderMark[];
   created_at: string;

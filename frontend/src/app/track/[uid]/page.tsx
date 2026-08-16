@@ -6,7 +6,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { Container } from "@/components/ui/Container";
 import { Eyebrow } from "@/components/ui/Eyebrow";
-import { Icon } from "@/components/ui/Icon";
+import { Icon, type IconName } from "@/components/ui/Icon";
 import { Badge } from "@/components/ui/Badge";
 import { PriceTag } from "@/components/ui/PriceTag";
 import {
@@ -97,6 +97,8 @@ function TrackInner() {
     (order.status === "in_review" || order.status === "pending_payment");
   const stepIdx = STEPS.indexOf(order.status);
   const cancelled = order.status === "cancelled";
+  // CONTACT_PHONE may hold several numbers; a tel: link takes exactly one.
+  const callNumber = shop?.contact_phone?.split(",")[0]?.trim() || "";
 
   return (
     <Shell>
@@ -128,38 +130,56 @@ function TrackInner() {
           </div>
         )}
 
-        <div className="rounded-2xl bg-surface p-5 text-center shadow-sm ring-1 ring-border">
-          <p className="text-sm text-muted">অর্ডার কোড</p>
-          <p className="mt-1 font-display text-2xl font-bold tracking-widest text-plum">{order.uid}</p>
-          <div className="mt-2 flex justify-center">
+        {/* Order code — the one thing the customer reads out on the phone, so it
+            is the biggest thing on the page and copyable in one tap. */}
+        <div className="overflow-hidden rounded-2xl bg-surface shadow-sm ring-1 ring-border">
+          <div className="brand-gradient px-5 py-6 text-center text-white">
+            <p className="text-xs font-semibold tracking-wide text-white/80">অর্ডার কোড</p>
+            <p className="mt-1 font-display text-3xl font-bold tracking-[0.2em]">{order.uid}</p>
+            <div className="mt-3 flex justify-center">
+              <CopyLine label="কোড কপি করুন" value={order.uid} tone="light" />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-5 py-4 text-center">
             <Badge tone={STATUS_TONE[order.status] ?? "neutral"}>
               {STATUS_LABEL[order.status] ?? order.status}
             </Badge>
+            {order.created_at && (
+              <span className="inline-flex items-center gap-1.5 text-sm text-muted">
+                <Icon name="clock" size={15} />
+                {formatDate(order.created_at)}
+              </span>
+            )}
           </div>
           {order.steadfast_tracking_code && (
-            <p className="mt-2 text-xs text-muted">ট্র্যাকিং: {order.steadfast_tracking_code}</p>
+            <div className="border-t border-border px-5 py-3">
+              <CopyLine
+                label="কুরিয়ার ট্র্যাকিং নম্বর"
+                value={order.steadfast_tracking_code}
+                showValue
+              />
+            </div>
           )}
         </div>
 
         {/* Progress tracker */}
-        {!cancelled && (
+        {!cancelled ? (
           <div className="rounded-2xl bg-surface p-5 shadow-sm ring-1 ring-border">
-            <div className="flex justify-between">
-              {STEPS.map((s, i) => (
-                <div key={s} className="flex flex-1 flex-col items-center">
-                  <div
-                    className={`flex h-9 w-9 items-center justify-center rounded-full text-xs font-semibold ${
-                      i <= stepIdx ? "bg-plum text-white" : "bg-surface-2 text-muted"
-                    }`}
-                  >
-                    {i < stepIdx ? <Icon name="check" size={16} /> : i + 1}
-                  </div>
-                  <span className="mt-1.5 text-center text-[10px] leading-tight text-muted">
-                    {STATUS_LABEL[s]}
-                  </span>
-                </div>
-              ))}
-            </div>
+            <Stepper stepIdx={stepIdx} />
+            {(order.status === "in_review" || order.status === "pending_payment") && (
+              <p className="mt-4 rounded-xl bg-gold/10 px-4 py-3 text-center text-sm text-foreground">
+                আমরা শীঘ্রই ফোন করে আপনার অর্ডার নিশ্চিত করব।
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 rounded-2xl bg-error/8 p-5 ring-1 ring-error/25">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-error/15 text-error">
+              <Icon name="x" size={20} />
+            </span>
+            <p className="text-sm font-semibold text-foreground">
+              এই অর্ডারটি বাতিল হয়েছে। প্রয়োজনে আমাদের সাথে যোগাযোগ করুন।
+            </p>
           </div>
         )}
 
@@ -220,41 +240,193 @@ function TrackInner() {
 
         {/* Items */}
         <div className="rounded-2xl bg-surface p-5 shadow-sm ring-1 ring-border">
-          <h2 className="mb-3 font-display text-base font-semibold text-foreground">আপনার পণ্য</h2>
+          <SectionTitle icon="gift">আপনার পণ্য</SectionTitle>
           {order.items.map((it) => (
-            <div key={it.id} className="flex gap-3 border-b border-border py-3 last:border-0">
-              <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-surface-2">
+            <div key={it.id} className="flex gap-3 border-b border-border py-3 last:border-0 last:pb-0">
+              <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-surface-2">
                 {it.preview_image ? (
-                  <Image src={mediaUrl(it.preview_image)} alt="" fill sizes="56px" className="object-cover" />
+                  <Image src={mediaUrl(it.preview_image)} alt="" fill sizes="64px" className="object-cover" />
                 ) : (
                   <span className="flex h-full items-center justify-center text-plum/25">
                     <Icon name="image" size={20} />
                   </span>
                 )}
               </div>
-              <div className="flex-1 text-sm">
+              <div className="min-w-0 flex-1 text-sm">
                 <div className="font-semibold text-foreground">{it.product_name}</div>
-                {it.config_display?.map((c, i) => (
-                  <div key={i} className="text-xs text-muted">{c.label}: {c.value}</div>
-                ))}
+                {(it.config_display?.length ?? 0) > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {it.config_display.map((c, i) => (
+                      <li key={i} className="flex gap-1.5 text-xs text-muted">
+                        <span className="shrink-0">{c.label}:</span>
+                        <span className="min-w-0 wrap-break-word text-foreground/80">{c.value}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
               <PriceTag price={it.price_snapshot} size="sm" />
             </div>
           ))}
-          <div className="mt-3 flex items-center justify-between">
-            <span className="font-display text-base font-semibold text-foreground">মোট</span>
-            <PriceTag price={order.total} size="md" />
+
+          {/* Money breakdown — delivery charge is the number customers ask about
+              most, so it is shown rather than hidden inside the total. */}
+          <div className="mt-4 space-y-1.5 border-t border-border pt-3">
+            <SummaryRow label="পণ্যের দাম" value={order.subtotal} />
+            <SummaryRow label="ডেলিভারি চার্জ" value={order.delivery_charge} />
+            {Number(order.advance_amount) > 0 && order.transaction_id && (
+              <SummaryRow label="অগ্রিম দেওয়া হয়েছে" value={order.advance_amount} />
+            )}
+            <div className="mt-2 flex items-center justify-between border-t border-border pt-3">
+              <span className="font-display text-lg font-semibold text-foreground">মোট</span>
+              <PriceTag price={order.total} size="lg" />
+            </div>
+            <p className="pt-1 text-center text-xs text-muted">ক্যাশ অন ডেলিভারি — পণ্য হাতে পেয়ে টাকা দিন</p>
           </div>
         </div>
 
+        {/* Delivery address — so the customer can spot a wrong address before the
+            parcel leaves, and read it back to us on the phone. */}
+        <div className="rounded-2xl bg-surface p-5 shadow-sm ring-1 ring-border">
+          <SectionTitle icon="truck">ডেলিভারি ঠিকানা</SectionTitle>
+          <div className="space-y-2.5 text-sm">
+            <AddressRow icon="user" label="নাম" value={order.customer_name} />
+            <AddressRow icon="phone" label="মোবাইল" value={order.phone} />
+            {order.whatsapp && order.whatsapp !== order.phone && (
+              <AddressRow icon="chat" label="হোয়াটসঅ্যাপ" value={order.whatsapp} />
+            )}
+            <AddressRow icon="pin" label="ঠিকানা" value={order.full_address || order.address} />
+          </div>
+          <p className="mt-3 rounded-xl bg-surface-2 px-4 py-2.5 text-xs text-muted">
+            ঠিকানা ভুল থাকলে দ্রুত আমাদের জানান — পণ্য পাঠানোর আগে ঠিক করে দেব।
+          </p>
+        </div>
+
+        {/* Help — one tap to a human, on every order, not only a brand-new one. */}
+        {(shop?.whatsapp_number || callNumber) && (
+          <div className="rounded-2xl bg-surface p-5 text-center shadow-sm ring-1 ring-border">
+            <p className="font-display text-base font-semibold text-foreground">কোনো প্রশ্ন আছে?</p>
+            <p className="mt-1 text-sm text-muted">অর্ডার কোড {order.uid} বলে আমাদের সাথে কথা বলুন।</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-center">
+              {shop?.whatsapp_number && (
+                <a
+                  href={`https://wa.me/88${shop.whatsapp_number.replace(/\D/g, "")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-success px-6 text-base font-semibold text-white transition active:scale-[0.98]"
+                >
+                  <Icon name="chat" size={18} /> হোয়াটসঅ্যাপ
+                </a>
+              )}
+              {callNumber && (
+                <a
+                  href={`tel:${callNumber.replace(/\s/g, "")}`}
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-plum/25 bg-surface px-6 text-base font-semibold text-plum transition active:scale-[0.98]"
+                >
+                  <Icon name="phone" size={18} /> ফোন করুন
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
         <Link
           href="/"
-          className="block text-center text-sm font-semibold text-plum hover:text-gold"
+          className="block py-2 text-center text-sm font-semibold text-plum hover:text-gold"
         >
           হোমে ফিরুন
         </Link>
       </div>
     </Shell>
+  );
+}
+
+// When the order was placed, in Bengali — date and time, so a customer who
+// ordered twice in one day can tell which order this page is.
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("bn-BD", {
+    day: "numeric", month: "long", year: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
+function SectionTitle({ icon, children }: { icon: IconName; children: React.ReactNode }) {
+  return (
+    <h2 className="mb-3 flex items-center gap-2 font-display text-base font-semibold text-foreground">
+      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-plum/8 text-plum">
+        <Icon name={icon} size={16} />
+      </span>
+      {children}
+    </h2>
+  );
+}
+
+function SummaryRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-muted">{label}</span>
+      <span className="font-semibold text-foreground">৳{Number(value) || value}</span>
+    </div>
+  );
+}
+
+function AddressRow({ icon, label, value }: { icon: IconName; label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex gap-3">
+      <span className="mt-0.5 shrink-0 text-plum/60"><Icon name={icon} size={16} /></span>
+      <div className="min-w-0">
+        <div className="text-xs text-muted">{label}</div>
+        <div className="wrap-break-word font-semibold text-foreground">{value}</div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Four workflow steps with the progress drawn as a filled rail behind them —
+ * a row of loose circles reads as four unrelated icons on a small screen.
+ * `stepIdx` is -1 while the order still awaits confirmation: nothing is filled,
+ * which is the truth.
+ */
+function Stepper({ stepIdx }: { stepIdx: number }) {
+  const pct = stepIdx <= 0 ? 0 : (stepIdx / (STEPS.length - 1)) * 100;
+  return (
+    <div className="relative">
+      {/* Rail sits behind the circles, inset by half a column so it starts and
+          ends at the first/last circle instead of the card edge. */}
+      <div className="absolute left-[12.5%] right-[12.5%] top-4.75 h-1 rounded-full bg-surface-2" />
+      <div
+        className="absolute left-[12.5%] top-4.75 h-1 rounded-full bg-plum transition-[width] duration-500"
+        style={{ width: `calc((100% - 25%) * ${pct / 100})` }}
+      />
+      <div className="relative grid grid-cols-4">
+        {STEPS.map((s, i) => {
+          const done = i < stepIdx;
+          const current = i === stepIdx;
+          return (
+            <div key={s} className="flex flex-col items-center">
+              <div
+                className={`flex h-10 w-10 items-center justify-center rounded-full border-4 border-surface text-xs font-semibold ${
+                  done || current ? "bg-plum text-white" : "bg-surface-2 text-muted"
+                } ${current ? "ring-2 ring-plum/30" : ""}`}
+              >
+                {done ? <Icon name="check" size={16} /> : i + 1}
+              </div>
+              <span
+                className={`mt-1.5 text-center text-[11px] leading-tight ${
+                  current ? "font-semibold text-plum" : "text-muted"
+                }`}
+              >
+                {STATUS_LABEL[s]}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -281,6 +453,55 @@ export default function TrackPage() {
     <Suspense fallback={<div className="p-8 text-center text-muted">লোড হচ্ছে...</div>}>
       <TrackInner />
     </Suspense>
+  );
+}
+
+/**
+ * A one-tap copy of a code (order uid, courier tracking number) — these get read
+ * out on the phone or pasted into the courier's own tracking page, and typing a
+ * 6-character code by hand is exactly where a customer gives up.
+ */
+function CopyLine({ label, value, showValue = false, tone = "dark" }: {
+  label: string; value: string; showValue?: boolean; tone?: "dark" | "light";
+}) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable (http, old browser) */ }
+  }
+  const button = (
+    <button
+      type="button"
+      onClick={copy}
+      className={`inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition active:scale-95 ${
+        tone === "light"
+          ? "bg-white/20 text-white hover:bg-white/30"
+          : "bg-plum/8 text-plum hover:bg-plum/15"
+      }`}
+    >
+      <Icon name={copied ? "check" : "copy"} size={14} />
+      {copied ? "কপি হয়েছে" : label}
+    </button>
+  );
+  if (!showValue) return button;
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-xs text-muted">{label}</div>
+        <div className="wrap-break-word font-semibold tabular-nums text-foreground">{value}</div>
+      </div>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label="কপি করুন"
+        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-plum/8 text-plum transition active:scale-95"
+      >
+        <Icon name={copied ? "check" : "copy"} size={16} />
+      </button>
+    </div>
   );
 }
 

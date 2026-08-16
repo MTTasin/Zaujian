@@ -13,7 +13,9 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -23,6 +25,7 @@ from app.finance_api import (
     cash_out,
     contact_balance,
     contact_ledger,
+    credit_allocation,
     dues_breakdown,
     month_net,
     receivables_breakdown,
@@ -267,6 +270,165 @@ class LedgerTests(FinanceBase):
         self.pay_supplier("1000")
         rows = contact_ledger("payable", self.supplier.id)
         self.assertEqual([r["balance"] for r in rows], [1000.0, 0.0])
+
+
+class CreditAllocationTests(FinanceBase):
+    """Per-row settled/left, derived oldest-first from the contact's own history.
+
+    Display only: nothing is stored and no payment is tied to an invoice, so the
+    balance math below must stay exactly what `contact_balance` already says.
+    The rule the owner asked for: a payment covers the oldest credits first, and
+    any money left over waits and covers credits entered later.
+    """
+
+    def alloc(self, direction="payable", contact=None):
+        contact = contact or (self.supplier if direction == "payable" else self.buyer)
+        return credit_allocation(direction, [contact.id])
+
+    def test_a_payment_settles_the_oldest_credit_first(self):
+        old = self.expense(amount=D("900"), is_credit=True,
+                           date=self.today - timedelta(days=4))
+        new = self.expense(amount=D("1100"), is_credit=True, date=self.today)
+        self.pay_supplier("900", date=self.today - timedelta(days=1))
+        a = self.alloc()
+        self.assertEqual(a[old.id], D("0"))      # settled
+        self.assertEqual(a[new.id], D("1100"))   # untouched
+
+    def test_a_part_payment_leaves_that_row_partly_owing(self):
+        e = self.expense(amount=D("1300"), is_credit=True)
+        self.pay_supplier("400")
+        self.assertEqual(self.alloc()[e.id], D("900"))
+
+    def test_leftover_money_covers_a_credit_entered_later(self):
+        # Overpay today, buy on credit tomorrow: the advance absorbs it.
+        old = self.expense(amount=D("500"), is_credit=True,
+                           date=self.today - timedelta(days=3))
+        self.pay_supplier("800", date=self.today - timedelta(days=3))
+        later = self.expense(amount=D("200"), is_credit=True, date=self.today)
+        a = self.alloc()
+        self.assertEqual(a[old.id], D("0"))
+        self.assertEqual(a[later.id], D("0"))
+        self.assertEqual(contact_balance("payable", self.supplier), D("-100"))
+
+    def test_same_day_credit_is_covered_before_a_same_day_payment_lands(self):
+        # Mirrors the ledger's same-day rule: buy 1000, pay 1000 -> settled.
+        e = self.expense(amount=D("1000"), is_credit=True)
+        self.pay_supplier("1000")
+        self.assertEqual(self.alloc()[e.id], D("0"))
+
+    def test_remaining_amounts_sum_to_the_contact_balance(self):
+        self.expense(amount=D("900"), is_credit=True,
+                     date=self.today - timedelta(days=5))
+        self.expense(amount=D("1300"), is_credit=True,
+                     date=self.today - timedelta(days=2))
+        self.expense(amount=D("1100"), is_credit=True)
+        self.pay_supplier("1300")
+        a = self.alloc()
+        self.assertEqual(sum(a.values()), contact_balance("payable", self.supplier))
+
+    def test_a_settled_contact_owes_nothing_on_any_row(self):
+        self.expense(amount=D("600"), is_credit=True)
+        self.expense(amount=D("400"), is_credit=True)
+        self.pay_supplier("1000")
+        self.assertEqual(set(self.alloc().values()), {D("0")})
+
+    def test_one_contact_never_eats_anothers_payment(self):
+        other = Supplier.objects.create(name="Lace Ghar", phone="0173")
+        mine = self.expense(amount=D("500"), is_credit=True)
+        theirs = self.expense(amount=D("500"), is_credit=True, supplier=other)
+        self.pay_supplier("500")
+        a = credit_allocation("payable", [self.supplier.id, other.id])
+        self.assertEqual(a[mine.id], D("0"))
+        self.assertEqual(a[theirs.id], D("500"))
+
+    def test_receivables_allocate_the_same_way(self):
+        old = self.income(amount=D("1000"), is_credit=True,
+                          date=self.today - timedelta(days=6))
+        new = self.income(amount=D("2000"), is_credit=True, date=self.today)
+        self.buyer_pays("1000")
+        a = self.alloc("receivable")
+        self.assertEqual(a[old.id], D("0"))
+        self.assertEqual(a[new.id], D("2000"))
+
+    def test_allocation_stores_nothing_and_rewrites_no_history(self):
+        e = self.expense(amount=D("700"), is_credit=True, description="dupattas")
+        self.pay_supplier("700")
+        self.alloc()
+        e.refresh_from_db()
+        self.assertEqual(e.amount, D("700"))
+        self.assertEqual(e.description, "dupattas")
+        self.assertEqual(CreditPayment.objects.get().amount, D("700"))
+        self.assertEqual(len(contact_ledger("payable", self.supplier.id)), 2)
+
+
+class CreditAllocationApiTests(FinanceBase):
+    """`credit_remaining` on the rows the Expenses/Income tables render."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_superuser("boss", password="x"))
+
+    def rows(self, path, **params):
+        return {r["id"]: r for r in self.client.get(path, params).json()}
+
+    def test_expense_rows_carry_their_own_remaining(self):
+        old = self.expense(amount=D("900"), is_credit=True,
+                           date=self.today - timedelta(days=3))
+        new = self.expense(amount=D("1100"), is_credit=True)
+        self.pay_supplier("900")
+        rows = self.rows("/api/admin/expenses/")
+        self.assertEqual(rows[old.id]["credit_remaining"], "0.00")
+        self.assertEqual(rows[new.id]["credit_remaining"], "1100.00")
+
+    def test_income_rows_carry_their_own_remaining(self):
+        i = self.income(amount=D("2000"), is_credit=True)
+        self.buyer_pays("500")
+        rows = self.rows("/api/admin/incomes/")
+        self.assertEqual(rows[i.id]["credit_remaining"], "1500.00")
+
+    def test_a_non_credit_row_has_no_remaining(self):
+        e = self.expense(amount=D("300"))
+        self.assertIsNone(self.rows("/api/admin/expenses/")[e.id]["credit_remaining"])
+
+    def test_a_credit_row_with_no_contact_has_no_remaining(self):
+        # SET_NULL on supplier delete leaves the purchase but no balance to read.
+        e = self.expense(amount=D("300"), is_credit=True)
+        Expense.objects.filter(pk=e.pk).update(supplier=None)
+        self.assertIsNone(self.rows("/api/admin/expenses/")[e.id]["credit_remaining"])
+
+    def test_a_row_outside_the_date_range_still_consumes_the_payment(self):
+        # The window shows only today, but the payment settled an older purchase,
+        # so today's row must NOT read as covered by it.
+        self.expense(amount=D("900"), is_credit=True,
+                     date=self.today - timedelta(days=30))
+        today = self.expense(amount=D("1100"), is_credit=True)
+        self.pay_supplier("900")
+        rows = self.rows("/api/admin/expenses/", start=self.today.isoformat())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[today.id]["credit_remaining"], "1100.00")
+
+    def test_listing_more_contacts_costs_no_more_queries(self):
+        """Allocation must not become an N+1 as the supplier list grows.
+
+        Asserted as a comparison, not a fixed count: the absolute number also
+        carries one-off middleware writes, so pinning it would break for reasons
+        that have nothing to do with this feature.
+        """
+        def add(n):
+            for i in range(n):
+                s = Supplier.objects.create(name=f"Shop {i}-{n}", phone=f"018{i}{n}")
+                self.expense(amount=D("100"), is_credit=True, supplier=s)
+                CreditPayment.objects.create(kind=PAYABLE, supplier=s,
+                                             date=self.today, amount=D("40"))
+
+        add(2)
+        self.client.get("/api/admin/expenses/")          # warm one-off writes
+        with CaptureQueriesContext(connection) as few:
+            self.client.get("/api/admin/expenses/")
+        add(20)
+        with CaptureQueriesContext(connection) as many:
+            self.client.get("/api/admin/expenses/")
+        self.assertEqual(len(many), len(few))
 
 
 class CashFlowTests(FinanceBase):

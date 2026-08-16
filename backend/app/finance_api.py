@@ -177,20 +177,66 @@ class OrderMarkSerializer(serializers.ModelSerializer):
         fields = ["id", "uid", "customer_name", "phone", "total", "status", "created_at"]
 
 
-class ExpenseSerializer(serializers.ModelSerializer):
+class CreditRowListSerializer(serializers.ListSerializer):
+    """Resolves the whole page's credit allocation in one pass.
+
+    Doing it per row would re-read every contact's history once per row; doing it
+    here costs two queries for the page no matter how many rows or contacts it
+    holds. Attached via `Meta.list_serializer_class`, so it applies to `many=True`
+    (the table) and never to a single-object response.
+    """
+
+    def to_representation(self, data):
+        rows = list(data)
+        self.context["credit_alloc"] = credit_allocation(
+            self.child.credit_direction,
+            [getattr(o, self.child.contact_field) for o in rows],
+        )
+        return super().to_representation(rows)
+
+
+class CreditRowSerializerMixin:
+    """`credit_remaining` — what THIS row still owes, oldest-credit-first.
+
+    The contact's total balance is the same number on every one of its rows, so
+    printing it per row made a long-settled purchase read as outstanding. See
+    `credit_allocation`: display only, nothing stored, balance math untouched.
+    """
+
+    def get_credit_remaining(self, obj):
+        if not obj.is_credit:
+            return None
+        contact_id = getattr(obj, self.contact_field)
+        if contact_id is None:
+            # A deleted contact SET_NULLs the row: the purchase is still history,
+            # but there is no running account left to place it in.
+            return None
+        alloc = self.context.get("credit_alloc")
+        if alloc is None:   # single-object response (create/update/retrieve)
+            alloc = credit_allocation(self.credit_direction, [contact_id])
+        value = alloc.get(obj.pk)
+        return None if value is None else str(value)
+
+
+class ExpenseSerializer(CreditRowSerializerMixin, serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     supplier_name = serializers.CharField(source="supplier.name", read_only=True, default="")
     total_out = serializers.SerializerMethodField()
+    credit_remaining = serializers.SerializerMethodField()
     order_marks = OrderMarkSerializer(source="orders", many=True, read_only=True)
 
+    credit_direction = "payable"
+    contact_field = "supplier_id"
+
     class Meta:
+        list_serializer_class = CreditRowListSerializer
         model = Expense
         fields = [
             "id", "date", "category", "category_name", "description",
             "amount", "vat_amount", "fee_amount", "total_out",
             "account", "supplier", "supplier_name",
-            "is_credit", "reference", "receipt", "orders", "order_marks",
-            "created_at",
+            "is_credit", "credit_remaining", "reference", "receipt",
+            "orders", "order_marks", "created_at",
         ]
         extra_kwargs = {"orders": {"required": False}}
 
@@ -238,18 +284,23 @@ class ExpenseSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class IncomeSerializer(serializers.ModelSerializer):
+class IncomeSerializer(CreditRowSerializerMixin, serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     buyer_name = serializers.CharField(source="buyer.name", read_only=True, default="")
     net_amount = serializers.SerializerMethodField()
+    credit_remaining = serializers.SerializerMethodField()
     order_marks = OrderMarkSerializer(source="orders", many=True, read_only=True)
 
+    credit_direction = "receivable"
+    contact_field = "buyer_id"
+
     class Meta:
+        list_serializer_class = CreditRowListSerializer
         model = Income
         fields = [
             "id", "date", "category", "category_name", "description",
             "amount", "fee_amount", "net_amount", "account", "reference",
-            "buyer", "buyer_name", "is_credit",
+            "buyer", "buyer_name", "is_credit", "credit_remaining",
             "orders", "order_marks", "created_at",
         ]
         extra_kwargs = {"orders": {"required": False}}
@@ -503,6 +554,62 @@ def receivables_breakdown():
          "count": Income.objects.filter(is_credit=True, buyer_id=r["id"]).count()}
         for r in rows
     ]
+
+
+def credit_allocation(direction, contact_ids):
+    """`{credit row id: what that row still owes}` for the given contacts.
+
+    DISPLAY ONLY. Nothing here is stored and no payment is tied to an invoice —
+    the running account is still the truth (see `contact_balance`). This just
+    answers the question the table asks: which of these rows is the money still
+    outstanding? Repeating the contact's whole balance on every one of its rows
+    made a purchase paid off weeks ago read as unpaid.
+
+    The rule is oldest-first: a payment covers the earliest credit still owing,
+    and money left over waits and covers credits entered later (a supplier
+    holding an advance). Ordering is `(date, id)`, the same key `contact_ledger`
+    uses, so a same-day "buy 1000, pay 1000" settles rather than reading as an
+    advance against nothing.
+
+    Two queries regardless of how many contacts or rows are on screen. The whole
+    history is needed, not just the date range on screen: a payment that settled
+    a purchase from last month must not appear to cover this week's.
+    """
+    ids = [i for i in set(contact_ids or []) if i is not None]
+    if not ids:
+        return {}
+
+    if direction == "payable":
+        credits = Expense.objects.filter(is_credit=True, supplier_id__in=ids)
+        payments = CreditPayment.objects.filter(
+            kind=CreditPayment.Kind.PAYABLE, supplier_id__in=ids)
+        contact_field = "supplier_id"
+    else:
+        credits = Income.objects.filter(is_credit=True, buyer_id__in=ids)
+        payments = CreditPayment.objects.filter(
+            kind=CreditPayment.Kind.RECEIVABLE, buyer_id__in=ids)
+        contact_field = "buyer_id"
+
+    # Payments are a POOL per contact, not dated against anything: their own
+    # date decides which month the cash left, never which purchase it covers.
+    pool = {
+        row[contact_field]: row["t"]
+        for row in payments.values(contact_field).annotate(
+            t=Coalesce(Sum("amount"), Value(ZERO), output_field=_MONEY))
+    }
+
+    out = {}
+    rows = sorted(
+        credits.values("id", "date", "amount", contact_field),
+        key=lambda r: (r["date"], r["id"]),
+    )
+    for r in rows:
+        left = pool.get(r[contact_field], ZERO)
+        applied = min(left, r["amount"])
+        if applied > ZERO:
+            pool[r[contact_field]] = left - applied
+        out[r["id"]] = r["amount"] - applied
+    return out
 
 
 def contact_ledger(direction, contact_id):

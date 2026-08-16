@@ -351,6 +351,8 @@ export interface AdminOrderRow {
   status_display: string;
   created_at: string;
   tags: OrderTag[];
+  /** How many cash-book entries are marked against this order. */
+  marked_count: number;
 }
 
 /**
@@ -712,6 +714,8 @@ export const ORDER_SORTS = [
   { value: "-district", label: "District Z → A" },
   { value: "paid", label: "Paid first" },
   { value: "unpaid", label: "Unpaid first" },
+  { value: "marked", label: "Money marked first" },
+  { value: "unmarked", label: "Nothing marked first" },
   { value: "courier", label: "Courier booked first" },
   { value: "no_courier", label: "Not booked first" },
   { value: "repeat", label: "Repeat customers first" },

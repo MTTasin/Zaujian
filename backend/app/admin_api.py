@@ -838,6 +838,19 @@ class AdminOrderTagViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
     serializer_class = OrderTagSerializer
 
 
+def with_mark_counts(qs):
+    """Annotate `_marks` = how many cash-book rows are marked against each order.
+
+    Two M2Ms joined at once, so both Counts must be `distinct=True` — without it
+    each join multiplies the other's rows and every count comes back squared.
+    """
+    from django.db.models import Count
+
+    return qs.annotate(
+        _marks=Count("expense_marks", distinct=True) + Count("income_marks", distinct=True),
+    )
+
+
 class AdminOrderListSerializer(serializers.ModelSerializer):
     """The Orders LIST — scalars only, no items.
 
@@ -853,6 +866,20 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     # One prefetch for the whole page — the list stays flat in queries.
     tags = OrderTagSerializer(many=True, read_only=True)
+    marked_count = serializers.SerializerMethodField()
+
+    def get_marked_count(self, obj) -> int:
+        """How many cash-book entries are MARKED against this order.
+
+        Annotated by the list queryset so the whole page stays one query. The
+        dashboard renders this same serializer over a plain queryset, so a
+        missing annotation counts on the spot rather than raising — it is at
+        most the handful of recent orders that card shows.
+        """
+        n = getattr(obj, "_marks", None)
+        if n is None:
+            n = obj.expense_marks.count() + obj.income_marks.count()
+        return n
 
     class Meta:
         model = Order
@@ -861,6 +888,7 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
             "subtotal", "delivery_charge", "total", "advance_received", "cod_amount",
             "payment_verified", "courier_submitted", "is_repeat_customer",
             "steadfast_status", "status", "status_display", "created_at", "tags",
+            "marked_count",
         ]
         read_only_fields = fields
 
@@ -926,6 +954,9 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         "-district": ["-district", "-thana", "-created_at"],
         "paid": ["-payment_verified", "-created_at"],
         "unpaid": ["payment_verified", "-created_at"],
+        # Cash-book entries marked against the order (`_marks`, annotated below).
+        "marked": ["-_marks", "-created_at"],
+        "unmarked": ["_marks", "-created_at"],
         "courier": ["-courier_submitted", "-created_at"],
         "no_courier": ["courier_submitted", "-created_at"],
         "repeat": ["-is_repeat_customer", "-created_at"],
@@ -941,6 +972,9 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
             # prefetching items + consignments for every order ever placed is
             # most of what made this page slow. One prefetch, not four.
             qs = qs.prefetch_related(None).prefetch_related("tags")
+        # Annotated for every action, not just the list: `?sort=marked` orders by
+        # it, and a sort that only worked on one code path is a trap.
+        qs = with_mark_counts(qs)
         st = self.request.query_params.get("status")
         if st:
             qs = qs.filter(status=st)
@@ -1838,7 +1872,8 @@ def admin_dashboard(request):
     sees_orders = can_read(request.user, "orders")
     # The card shows uid/customer/total/status, so it takes the light serializer
     # too — the full one walked every item's option config for ten orders.
-    recent = Order.objects.all()[:10] if sees_orders else Order.objects.none()
+    recent = (with_mark_counts(Order.objects.all())[:10] if sees_orders
+              else Order.objects.none())
 
     # Money is business-wide now (Finance cash-book), not per order: this month's
     # income minus spending. See app/finance_api.py.

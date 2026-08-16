@@ -25,6 +25,33 @@ function fmtDate(iso: string): string {
   });
 }
 
+/**
+ * How many cash-book entries are marked against the order, as ticks — the
+ * question this column answers is "did I already record the money for this
+ * one", which is a glance, not a number.
+ *
+ * Capped at three: past that the ticks stop being countable at a glance and
+ * only the exact figure helps, which lives on the order page. A 4th+ entry
+ * shows as "3+" in the tooltip so the row never claims there are exactly three.
+ */
+function MarkTicks({ count }: { count: number }) {
+  const n = Math.min(count ?? 0, 3);
+  if (n === 0) return <span className="text-slate-300">—</span>;
+  return (
+    <span
+      className="inline-flex items-center text-emerald-600"
+      title={`${count} money ${count === 1 ? "entry" : "entries"} marked against this order`}
+    >
+      {Array.from({ length: n }, (_, i) => (
+        <span key={i} className={i > 0 ? "-ml-1.5" : ""}>
+          <Icon name="check" size={16} />
+        </span>
+      ))}
+      {count > 3 && <span className="ml-0.5 text-xs font-semibold">+</span>}
+    </span>
+  );
+}
+
 // Readable names for the colour key (the raw values stay in the dropdowns, so
 // the two always line up).
 const STATUS_LABEL: Record<string, string> = {
@@ -305,8 +332,8 @@ export default function AdminOrders() {
               <Th onClick={toggle("total_high", "total_low")} title="Sort by total">
                 Total{arrow("total_high", "total_low")}
               </Th>
-              <Th onClick={toggle("paid", "unpaid")} title="Sort by payment verified">
-                Paid?{arrow("paid", "unpaid")}
+              <Th onClick={toggle("marked", "unmarked")} title="Sort by cash-book entries marked against the order">
+                Money marked{arrow("marked", "unmarked")}
               </Th>
               <Th onClick={toggle("courier", "no_courier")} title="Sort by courier booked">
                 Courier{arrow("courier", "no_courier")}
@@ -352,9 +379,7 @@ export default function AdminOrders() {
                 <Td>{o.phone}</Td>
                 <Td className="tabular-nums">৳ {o.total}</Td>
                 <Td>
-                  {o.payment_verified
-                    ? <span className="text-emerald-600"><Icon name="check" size={16} /></span>
-                    : <span className="text-slate-300">—</span>}
+                  <MarkTicks count={o.marked_count} />
                 </Td>
                 <Td>
                   {o.courier_submitted
