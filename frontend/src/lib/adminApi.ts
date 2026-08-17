@@ -277,6 +277,8 @@ export type ExtraConsignment = {
   consignment_id: string;
   tracking_code: string;
   status: string;
+  /** See AdminOrder.consignment_missing — same fact, per additional parcel. */
+  missing: boolean;
   cod_amount: string;
   recipient_name: string;
   recipient_phone: string;
@@ -314,6 +316,9 @@ export interface AdminOrder {
   steadfast_consignment_id: string;
   steadfast_tracking_code: string;
   steadfast_status: string;
+  /** Steadfast no longer recognises the booked consignment — almost always
+   *  because it was deleted in their panel. Set by Refresh status / the sweep. */
+  consignment_missing: boolean;
   courier_submitted: boolean;
   status: string;
   status_display: string;
@@ -347,6 +352,7 @@ export interface AdminOrderRow {
   courier_submitted: boolean;
   is_repeat_customer: boolean;
   steadfast_status: string;
+  consignment_missing: boolean;
   status: string;
   status_display: string;
   created_at: string;

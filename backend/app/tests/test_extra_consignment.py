@@ -86,7 +86,9 @@ class BookExtraApiTests(APITestCase):
         with patch("app.admin_api.create_consignment", side_effect=SteadfastError("down")):
             r = self.client.post(f"/api/admin/orders/{self.order.id}/book_extra/",
                                  {"cod_amount": "250"}, format="json")
-        self.assertEqual(r.status_code, 502)
+        # 409, not 502: see `_courier_error` — an app-level 502 is
+        # indistinguishable from the gateway itself failing.
+        self.assertEqual(r.status_code, 409)
         self.assertEqual(self.order.extra_consignments.count(), 0)
 
     def test_serializer_lists_extras(self):

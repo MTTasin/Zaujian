@@ -541,6 +541,13 @@ class Order(models.Model):
     steadfast_tracking_code = models.CharField(max_length=64, blank=True)
     steadfast_status = models.CharField(max_length=32, blank=True)
     courier_submitted = models.BooleanField(default=False)
+    # Steadfast no longer recognises `steadfast_consignment_id` — almost always
+    # because it was deleted in their panel. Kept OUT of `steadfast_status`,
+    # which holds their own delivery_status vocabulary and stays the record of
+    # what last actually happened to the parcel. This is what re-enables the
+    # panel's Re-submit button: without it a deleted parcel leaves a stale
+    # status behind forever and the one button that fixes it stays greyed out.
+    consignment_missing = models.BooleanField(default=False)
 
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING_PAYMENT
@@ -599,6 +606,8 @@ class ExtraConsignment(models.Model):
     consignment_id = models.CharField(max_length=64, blank=True)
     tracking_code = models.CharField(max_length=64, blank=True)
     status = models.CharField(max_length=32, blank=True)
+    # See Order.consignment_missing — same fact, per additional parcel.
+    missing = models.BooleanField(default=False)
     cod_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
     recipient_name = models.CharField(max_length=100, blank=True)
     recipient_phone = models.CharField(max_length=20, blank=True)

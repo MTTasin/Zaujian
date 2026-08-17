@@ -207,6 +207,41 @@ def _fire_purchase(order):
 from .services.consignments import DELIVERED as STEADFAST_DELIVERED  # noqa: E402
 
 
+def _courier_error(exc):
+    """The one answer every courier action gives when Steadfast refuses.
+
+    Deliberately NOT 502/504. Those are what a reverse proxy emits when the app
+    itself failed to answer, and this backend sits behind Cloudflare ->
+    LiteSpeed -> Passenger: an app-level 502 is indistinguishable in the browser
+    console from the gateway giving up, so a courier problem reads as the site
+    being down. The courier refusing our request is a conflict (409); a
+    consignment it no longer has is a 404.
+    """
+    from .services.steadfast_order import ConsignmentGoneError
+    code = (status.HTTP_404_NOT_FOUND if isinstance(exc, ConsignmentGoneError)
+            else status.HTTP_409_CONFLICT)
+    return Response({"error": str(exc)}, status=code)
+
+
+def _mark_consignment_missing(order, missing):
+    """Record whether Steadfast still recognises this order's PRIMARY parcel.
+
+    Cleared as readily as it is set: a 401 is also what wrong API keys look
+    like, and a consignment can be re-created in their panel. Nothing here is
+    a verdict — it is the last answer Steadfast gave.
+    """
+    if order.consignment_missing != missing:
+        order.consignment_missing = missing
+        order.save(update_fields=["consignment_missing", "updated_at"])
+
+
+def _mark_extra_missing(ec, missing):
+    """Same, per additional parcel."""
+    if ec.missing != missing:
+        ec.missing = missing
+        ec.save(update_fields=["missing"])
+
+
 def _sync_order_from_steadfast(order):
     """Refresh `order`'s Steadfast statuses (primary + every extra consignment) and
     promote the order to `delivered` when ALL of its booked parcels are delivered.
@@ -216,9 +251,17 @@ def _sync_order_from_steadfast(order):
     Raises SteadfastError — the caller decides whether that aborts the sweep.
     """
     from .services.consignments import parcel_statuses, promote_if_all_delivered
-    from .services.steadfast_order import get_status_by_cid
+    from .services.steadfast_order import ConsignmentGoneError, get_status_by_cid
 
-    polled = get_status_by_cid(order.steadfast_consignment_id)
+    # The sweep is where a deleted parcel actually gets noticed — nobody opens
+    # every order by hand. So it marks as well as reports; the caller still
+    # collects the error either way.
+    try:
+        polled = get_status_by_cid(order.steadfast_consignment_id)
+    except ConsignmentGoneError:
+        _mark_consignment_missing(order, True)
+        raise
+    _mark_consignment_missing(order, False)
     if polled != order.steadfast_status:
         order.steadfast_status = polled
         order.save(update_fields=["steadfast_status", "updated_at"])
@@ -226,7 +269,12 @@ def _sync_order_from_steadfast(order):
     for ec in order.extra_consignments.all():
         if not ec.consignment_id:
             continue              # never booked → cannot be delivered
-        st = get_status_by_cid(ec.consignment_id)
+        try:
+            st = get_status_by_cid(ec.consignment_id)
+        except ConsignmentGoneError:
+            _mark_extra_missing(ec, True)
+            raise
+        _mark_extra_missing(ec, False)
         if st != ec.status:
             ec.status = st
             ec.save(update_fields=["status"])
@@ -772,7 +820,7 @@ class ExtraConsignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExtraConsignment
         fields = ["id", "invoice", "consignment_id", "tracking_code", "status",
-                  "cod_amount", "recipient_name", "recipient_phone",
+                  "missing", "cod_amount", "recipient_name", "recipient_phone",
                   "recipient_address", "item_description", "created_at", "events"]
 
 
@@ -823,6 +871,7 @@ class AdminOrderSerializer(serializers.ModelSerializer):
             "payment_method", "transaction_id", "payment_screenshot", "payment_verified",
             "fraud_check_result",
             "steadfast_consignment_id", "steadfast_tracking_code", "steadfast_status",
+            "consignment_missing",
             "courier_submitted", "status", "status_display", "created_at",
             "items", "extra_consignments", "consignment_events", "tags",
         ]
@@ -887,7 +936,8 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
             "id", "uid", "customer_name", "phone", "district",
             "subtotal", "delivery_charge", "total", "advance_received", "cod_amount",
             "payment_verified", "courier_submitted", "is_repeat_customer",
-            "steadfast_status", "status", "status_display", "created_at", "tags",
+            "steadfast_status", "consignment_missing",
+            "status", "status_display", "created_at", "tags",
             "marked_count",
         ]
         read_only_fields = fields
@@ -1164,14 +1214,21 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
     @action(detail=True, methods=["post"])
     def steadfast_status(self, request, pk=None):
         """Refresh this order's Steadfast delivery status."""
-        from .services.steadfast_order import SteadfastError, get_status
+        from .services.steadfast_order import ConsignmentGoneError, SteadfastError, get_status
         order = self.get_object()
         if not order.steadfast_consignment_id:
             return Response({"error": "No consignment booked yet"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             st = get_status(order)
+        except ConsignmentGoneError as exc:
+            # Leave `steadfast_status` alone — the last status Steadfast DID
+            # report is still the truth about what happened to that parcel.
+            # The parcel being gone is a separate fact, recorded separately.
+            _mark_consignment_missing(order, True)
+            return _courier_error(exc)
         except SteadfastError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            return _courier_error(exc)
+        _mark_consignment_missing(order, False)
         order.steadfast_status = st
         order.save(update_fields=["steadfast_status", "updated_at"])
         return Response(self.get_serializer(order).data)
@@ -1229,14 +1286,19 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
     def resubmit_steadfast(self, request, pk=None):
         """Re-book the consignment on Steadfast (after a failed/unknown submit).
         Uses a fresh unique invoice so Steadfast doesn't reject it as a duplicate."""
-        from .services.steadfast_order import SteadfastError, create_consignment
+        # Deliberately NOT re-imported locally: a local `from ... import
+        # create_consignment` shadows the module-level name, so a test patching
+        # `app.admin_api.create_consignment` silently misses this one action and
+        # fires a REAL booking request at Steadfast.
         order = self.get_object()
         invoice = f"{order.uid}-{timezone.now().strftime('%H%M%S')}"
         try:
             res = create_consignment(order, invoice=invoice,
                                      overrides=self._primary_overrides(order, request.data))
         except SteadfastError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            return _courier_error(exc)
+        # A fresh booking replaces whatever was missing.
+        order.consignment_missing = False
         order.steadfast_consignment_id = res["consignment_id"]
         order.steadfast_tracking_code = res["tracking_code"]
         order.steadfast_status = res["status"]
@@ -1276,7 +1338,7 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         try:
             res = create_consignment(order, invoice=invoice, overrides=overrides)
         except SteadfastError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            return _courier_error(exc)
 
         ec = ExtraConsignment.objects.create(
             order=order, invoice=invoice,
@@ -1316,7 +1378,8 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
     @action(detail=True, methods=["post"])
     def extra_status(self, request, pk=None):
         """Refresh ONE additional consignment's Steadfast delivery status."""
-        from .services.steadfast_order import SteadfastError, get_status_by_cid
+        from .services.steadfast_order import (ConsignmentGoneError, SteadfastError,
+                                               get_status_by_cid)
         order = self.get_object()
         ec = self._get_extra(order, request)
         if not ec:
@@ -1324,10 +1387,20 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         if not ec.consignment_id:
             return Response({"error": "Not booked yet"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            ec.status = get_status_by_cid(ec.consignment_id)
+            polled = get_status_by_cid(ec.consignment_id)
+        except ConsignmentGoneError as exc:
+            _mark_extra_missing(ec, True)     # keep `status`, see steadfast_status
+            return _courier_error(exc)
         except SteadfastError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        ec.save(update_fields=["status"])
+            return _courier_error(exc)
+        ec.status = polled
+        ec.missing = False
+        ec.save(update_fields=["status", "missing"])
+        # The viewset prefetched `extra_consignments` and `_get_extra` re-queried
+        # one, so the row just written and the row about to be serialized are two
+        # different objects. Drop the prefetch cache or the panel is answered with
+        # the value from before this refresh.
+        order.refresh_from_db()
         return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["post"])
@@ -1351,12 +1424,15 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
         try:
             res = create_consignment(order, invoice=invoice, overrides=overrides)
         except SteadfastError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            return _courier_error(exc)
         ec.invoice = invoice
         ec.consignment_id = res["consignment_id"]
         ec.tracking_code = res["tracking_code"]
         ec.status = res["status"]
-        ec.save(update_fields=["invoice", "consignment_id", "tracking_code", "status"])
+        ec.missing = False      # a fresh booking replaces whatever was missing
+        ec.save(update_fields=["invoice", "consignment_id", "tracking_code",
+                               "status", "missing"])
+        order.refresh_from_db()     # stale prefetch, see extra_status
         return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["post"])
@@ -1565,9 +1641,9 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
             result = create_consignment(order,
                                         overrides=self._primary_overrides(order, request.data))
         except SteadfastError as exc:
-            return Response({"error": f"Steadfast booking failed: {exc}"},
-                            status=status.HTTP_502_BAD_GATEWAY)
+            return _courier_error(SteadfastError(f"Steadfast booking failed: {exc}"))
 
+        order.consignment_missing = False
         order.steadfast_consignment_id = result["consignment_id"]
         order.steadfast_tracking_code = result["tracking_code"]
         order.steadfast_status = result["status"]

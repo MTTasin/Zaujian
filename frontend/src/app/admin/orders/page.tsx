@@ -382,9 +382,15 @@ export default function AdminOrders() {
                   <MarkTicks count={o.marked_count} />
                 </Td>
                 <Td>
-                  {o.courier_submitted
-                    ? <span className="text-plum"><Icon name="truck" size={16} /></span>
-                    : <span className="text-slate-300">—</span>}
+                  {/* A booked parcel Steadfast no longer has needs re-booking,
+                      and nobody opens every order — so it has to show here. */}
+                  {o.consignment_missing
+                    ? <span className="text-red-600" title="Steadfast no longer has this consignment — open the order and re-submit">
+                        <Icon name="truck" size={16} />
+                      </span>
+                    : o.courier_submitted
+                      ? <span className="text-plum"><Icon name="truck" size={16} /></span>
+                      : <span className="text-slate-300">—</span>}
                 </Td>
                 <Td>
                   <div onClick={(e) => e.stopPropagation()}>

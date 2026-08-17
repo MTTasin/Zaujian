@@ -768,6 +768,15 @@ export default function AdminOrderDetail() {
               <Row k="Consignment" v={order.steadfast_consignment_id} />
               <Row k="Tracking" v={order.steadfast_tracking_code || "—"} />
               <Row k="Status" v={order.steadfast_status || "—"} />
+              {order.consignment_missing && (
+                // The status above is the last one Steadfast reported and is now
+                // frozen — say so, or it reads as live.
+                <p className="mt-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                  Steadfast no longer has this consignment — it was most likely
+                  deleted in their panel. The status above is the last one they
+                  reported and will not change again. Re-submit to book a new parcel.
+                </p>
+              )}
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 {order.steadfast_tracking_code && (
                   <AdminButton
@@ -800,7 +809,12 @@ export default function AdminOrderDetail() {
                 </AdminButton>
                 {(() => {
                   const st = (order.steadfast_status || "").toLowerCase();
-                  const valid = st !== "" && st !== "unknown";
+                  // A stored status normally means the parcel exists — except
+                  // when Steadfast has told us it does not. Deleting it in their
+                  // panel leaves our last-known status behind forever, and
+                  // without this check the one button that fixes that is the one
+                  // button greyed out.
+                  const valid = st !== "" && st !== "unknown" && !order.consignment_missing;
                   return (
                     <AdminButton
                       variant="danger"
@@ -853,7 +867,9 @@ export default function AdminOrderDetail() {
           )}
           {order.extra_consignments.map((ec) => {
             const st = (ec.status || "").toLowerCase();
-            const bookedValid = st !== "" && st !== "unknown";
+            // Same rule as the primary parcel above: a stored status means the
+            // consignment exists, unless Steadfast has said it no longer does.
+            const bookedValid = st !== "" && st !== "unknown" && !ec.missing;
             return (
               <div key={ec.id} className="border-t border-slate-100 py-2 text-sm">
                 <div className="flex flex-wrap gap-x-6 gap-y-1">
@@ -862,6 +878,11 @@ export default function AdminOrderDetail() {
                   <span>Track: {ec.tracking_code || "—"}</span>
                   <span>Status: {ec.status || "—"}</span>
                   <span>COD: ৳{ec.cod_amount}</span>
+                  {ec.missing && (
+                    <span className="font-semibold text-red-600">
+                      Steadfast no longer has this consignment — re-submit
+                    </span>
+                  )}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {ec.tracking_code && (

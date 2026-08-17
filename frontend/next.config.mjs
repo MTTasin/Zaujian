@@ -1,7 +1,16 @@
-import type { NextConfig } from "next";
+// Deliberately .mjs, NOT .ts. A `next.config.ts` makes Next transpile the config
+// with the SWC native module at EVERY server boot (server/config.js ->
+// transpileConfig -> loadBindings), which starts a Tokio runtime sized to
+// `available_parallelism()`. On the 32-core shared host that is 32 threads per
+// Next process, alive for the process's whole life and doing nothing — enough to
+// push the cPanel account to its 200-process ceiling on its own. `.mjs` skips
+// that branch entirely: the binding is never loaded. See DEPLOY.md.
+//
+// `.mjs` rather than `.js` because package.json has no `"type": "module"`, so
+// `export default` keeps working unchanged.
 
-// Allow Django-served media through next/image (dev + prod hosts).
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   images: {
     // Media is served by Django on the same host (private IP in dev, same VPS in
     // prod). Next 16 blocks optimizing private-IP upstreams, and cPanel static

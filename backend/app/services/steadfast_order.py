@@ -18,6 +18,15 @@ class SteadfastError(Exception):
     """Raised when consignment creation fails."""
 
 
+class ConsignmentGoneError(SteadfastError):
+    """Steadfast does not recognise this consignment id any more.
+
+    A subclass, so every existing `except SteadfastError` still catches it and
+    nothing has to change to stay safe — only the callers that want to say
+    something more useful need to know about it.
+    """
+
+
 def _cfg(key, default=None):
     return settings.COURIER.get(key, default)
 
@@ -148,6 +157,18 @@ def get_status_by_cid(cid):
         resp = requests.get(f"{base}/status_by_cid/{cid}", headers=_headers(), timeout=timeout)
     except requests.RequestException as exc:
         raise SteadfastError(f"Network error: {exc}") from exc
+    # Steadfast answers 401 "Unauthorized Access" for a consignment id that is
+    # not in this merchant account — including one the admin deleted in their
+    # panel. There is no 404. Passing "Steadfast returned HTTP 401" up reads as
+    # "our API keys broke" and sends the admin looking in the wrong place, so
+    # this one status gets its own type and its own sentence. (Genuinely wrong
+    # credentials fail the same way, hence the second half of the message.)
+    if resp.status_code == 401:
+        raise ConsignmentGoneError(
+            f"Steadfast no longer recognises consignment {cid} — it was most "
+            f"likely deleted in the Steadfast panel. Re-submit to book a new "
+            f"one. (Same answer if the API keys are wrong.)"
+        )
     if resp.status_code >= 400:
         raise SteadfastError(f"Steadfast returned HTTP {resp.status_code}")
     try:

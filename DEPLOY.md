@@ -92,37 +92,65 @@ Add in the Node App's **Environment variables**:
 | `NEXT_PUBLIC_META_PIXEL_ID` | `1504590814166492` |
 | `NEXT_PUBLIC_SITE_URL` | `https://zaujain.mttasin.com` |
 
-**Also set these two — they are the difference between ~43 and ~12 threads per
-Node instance** (runtime vars, no rebuild needed, restart the app after):
+**Also set these two** (runtime vars, no rebuild needed, restart after). They are
+worth ~4 threads per instance — real but small; the big one is the config-file
+rule below.
 
 | Key | Value | Why |
 |-----|-------|-----|
-| `NODE_OPTIONS` | `--v8-pool-size=2` | V8 sizes its worker pool to the **host's** core count, not your plan. On a 16–32 core shared box that is 16–32 threads doing nothing for a site this size. |
+| `NODE_OPTIONS` | `--v8-pool-size=2` | V8's worker pool, default 4. |
 | `UV_THREADPOOL_SIZE` | `2` | libuv's fs/DNS pool, default 4. |
 
-### cPanel "Number of Processes 101/200" with one visitor
-Not a bug and not real load — CloudLinux LVE counts **threads** against `nproc`.
-A default Node process on a big host carries ~43 threads, and LiteSpeed keeps
-**two** instances of the app warm: 43 × 2 = 86, plus the other apps ≈ 101.
-Physical memory sitting at 354 MB / 4 GB is the proof that nothing is actually
-busy.
+`TOKIO_WORKER_THREADS` / `RAYON_NUM_THREADS` are harmless to set but **do
+nothing** — Next passes an explicit `worker_threads` to the Tokio builder, and an
+explicit value beats the env var. Do not rely on them.
 
-It still needs fixing, because the resource graph shows **Nproc faults** — once a
-traffic spike makes LiteSpeed start a third instance the account hits 200 and
-requests get refused. Order of impact:
+### The config file MUST NOT be `next.config.ts`
+This is the single biggest lever on this host, and it is a source rule, not a
+setting. `server/config.js` branches on the file name: a `.ts` config goes
+through `transpileConfig() -> loadBindings()`, which loads the `next-swc` Rust
+module **at every server boot** just to transpile that one small file. That
+module starts a Tokio runtime sized to `available_parallelism()` — the **host's**
+32 cores, not the account's slice — and the runtime never shuts down. Result: 32
+idle `tokio-runtime-w` threads for the life of every Next process.
 
-1. The two env vars above (biggest win, entirely in your control).
-2. Ask the host to cap the `zaujain.xyz` Node app at **one instance** — only they
-   can change the `lsnode` pool. Halves whatever remains.
-3. Remove Node/Python apps you no longer use (the `crm.mttasin.com` app was 11
-   threads) and **restart** so stale workers are reaped.
-4. Backend: 4 `lswsgi` workers for `backzaujain` is more than this traffic needs;
-   ask for 2.
+`next.config.mjs` and `next.config.js` skip that branch: the binding is never
+loaded and those 32 threads never exist. The config is kept as **`.mjs`** for
+exactly this reason (`.mjs` and not `.js` because `package.json` has no
+`"type": "module"`, so `export default` keeps working). Type checking survives
+through the JSDoc `@type` annotation at the top of the file.
 
-Verify after restarting — thread count per PID, not process count:
+Measured on this account: 43 threads per instance → **7**.
+
+### cPanel "Number of Processes NNN/200" with almost no visitors
+Not real load — CloudLinux LVE counts **threads** against `nproc`, and Entry
+Processes is the number actually serving requests. 185/200 nproc alongside 6/120
+entry processes and 517 MB / 4 GB is an idle pool, not traffic.
+
+Diagnose by thread count per process, never by process count:
 ```bash
-ps -o pid,nlwp,cmd -u "$USER" | sort -k2 -n -r | head
+ps -eo pid,nlwp,etime,rss,args --user $(whoami) | grep lsnode | grep -v grep
+ps -o comm= -L -p <PID> | sort | uniq -c | sort -rn   # names the threads
 ```
+The second command is the one that ends the guessing — it says outright whether
+they are `tokio-runtime-w`, `V8Worker`, or `libuv-worker`, and therefore which
+knob applies. A healthy zaujain instance is ~7; `crm.mttasin.com` (plain Node, no
+Next) sits at 11 for comparison.
+
+### The restart button does NOT reap `lsnode` — check after every deploy
+cPanel's Restart on the Node app left three `zaujain.xyz` instances running, two
+of them **3.5 days old**, each holding 43 threads. Every deploy stacked another
+one; that accumulation, not traffic, is what walks the account to 200 over weeks.
+
+So a frontend deploy is not finished until the old instances are gone:
+```bash
+ps -eo pid,nlwp,etime,args --user $(whoami) | grep '[z]aujain.xyz'
+kill <each stale PID>
+```
+Then load the site once — LiteSpeed spawns on demand, so the count stays at zero
+until someone visits, and the fresh instance is the one that picks up any env-var
+change. Nothing is lost by killing them; in-flight requests are a rounding error
+at this traffic.
 
 ### 4. Install + build + start
 In the Node app terminal:
