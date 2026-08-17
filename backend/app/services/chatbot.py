@@ -83,51 +83,45 @@ def _shop_facts():
 def _build_shop_facts():
     # The storefront DB is the single source of truth for products and prices.
     # Without this the model has no numbers to ground on and invents them.
-    from decimal import Decimal
-
     from django.conf import settings
 
     from ..models import GalleryTag, PrebuiltCombo, Product
-    from .pricing import price_bounds
 
     lines = [
         "## LIVE SHOP DATA — the ONLY source of truth for prices and products.",
-        "Quote prices ONLY from the list below, exactly as written. "
-        "Never invent, guess, estimate or round a price. "
-        "If a product or price is not listed here, do NOT make one up — say you will "
+        "The ONLY quotable prices are the READY-MADE LISTINGS below — those are the "
+        "prices the customer sees on the website. Copy them exactly as written, digit "
+        "for digit. Never invent, guess, estimate, round or convert a price. "
+        "If a price is not listed here, do NOT make one up — say you will "
         "check and end your reply with [HANDOFF].",
     ]
 
     products = list(Product.objects.filter(active=True).prefetch_related("specs"))
     if products:
-        lines.append("## PRODUCTS (all prices in BDT/৳) — this is the COMPLETE catalogue")
+        # DELIBERATELY PRICELESS. A Product's own price is what one item costs
+        # inside the customizer — it is never shown on /products, so quoting it
+        # gives the customer a number they cannot find anywhere on the site
+        # (a ৳1100 book against a catalogue starting at ৳1250). Only the
+        # READY-MADE LISTINGS below carry quotable prices.
+        lines.append(
+            "## CUSTOMIZABLE PARTS — names and details ONLY, no prices exist here"
+        )
+        lines.append(
+            "These are the pieces a customer can customize inside a listing. "
+            "They are NOT sold as separate priced items and you have NO price for "
+            "them. If asked what one of them costs on its own, say you will check "
+            "and end with [HANDOFF] — never take a price from a listing below and "
+            "present it as the price of one part."
+        )
         for p in products:
-            lo = hi = Decimal(p.base_price)
-            if p.is_customizable:
-                b_lo, b_hi = price_bounds(p)
-                # price_bounds() returns (0,0) for e.g. a dupatta with no active
-                # options. Never let that become a "free" quote — fall back to base.
-                if b_hi:
-                    lo, hi = b_lo or b_hi, b_hi
-
             flags = []
             if p.track_stock and not p.in_stock:
                 flags.append("OUT OF STOCK — do not take an order")
             if p.is_customizable:
                 flags.append("customizable")
             label = f"{p.name} ({p.category})" if p.category else p.name
-
-            if not hi:  # no usable price anywhere
-                flags.insert(0, "PRICE NOT SET — never quote a price, use [HANDOFF]")
-                lines.append(f"- {label} [{'; '.join(flags)}]")
-                continue
-
-            price = (
-                _money(lo) if lo == hi
-                else f"{_money(lo)} - {_money(hi)} (depends on chosen options)"
-            )
             suffix = f" [{'; '.join(flags)}]" if flags else ""
-            lines.append(f"- {label}: ৳{price}{suffix}")
+            lines.append(f"- {label}{suffix}")
             if p.description:
                 lines.append(f"    বিবরণ: {_clip(p.description)}")
             for s in p.specs.all():
@@ -244,6 +238,15 @@ _BEHAVIOR = (
     "- NEVER invent or guess a phone number, contact number, bKash/Nagad number or "
     "address. Use ONLY the exact numbers in LIVE SHOP DATA. If the number asked for is "
     "not there, say you'll connect them to a person and end with [HANDOFF].\n"
+    "- Write EVERY number (price, delivery charge, size, phone) with the SAME digits "
+    "shown in LIVE SHOP DATA — plain 0-9. Never convert a number to Bengali numerals "
+    "(১২৫০) and never re-type it from memory: copy it character by character. A single "
+    "wrong digit is a wrong price to the customer.\n"
+    "- NEVER state a size, dimension, ইঞ্চি/inch, weight, material, page count, colour "
+    "list or any other specification unless that exact detail appears in LIVE SHOP DATA "
+    "for that item. You do NOT know the sizes. If asked and it is not listed, say you "
+    "will check with the team and end your reply with [HANDOFF]. Guessing a size is as "
+    "bad as guessing a price.\n"
     "- If the customer keeps asking for something you cannot do (e.g. delivery "
     "outside Bangladesh), state it clearly ONCE, then end your reply with [HANDOFF].\n"
     "- Vary your wording; never send the same sentence twice."

@@ -19,10 +19,17 @@ class ShopFactsTests(TestCase):
             category="x", base_price=Decimal("999"), active=False,
         )
 
-    def test_lists_active_db_products_with_prices(self):
+    def test_lists_active_db_products_without_a_price(self):
+        """A Product's own price is only reachable inside the customizer — it is
+        never a price on /products, so quoting it hands the customer a number
+        they cannot find on the site. Names and details only."""
         facts = _shop_facts()
         self.assertIn("Premium Dupatta", facts)
-        self.assertIn("1600", facts)
+        self.assertNotIn("1600", facts)
+
+    def test_tells_the_bot_to_hand_off_on_a_part_price(self):
+        self.assertIn("[HANDOFF]", _shop_facts())
+        self.assertIn("NOT sold as separate priced items", _shop_facts())
 
     def test_hides_inactive_products(self):
         facts = _shop_facts()
@@ -71,9 +78,9 @@ class ShopFactsTests(TestCase):
         facts = _shop_facts()
         self.assertIn("Never invent", facts)
 
-    def test_never_quotes_zero_for_a_priced_product(self):
-        """price_bounds() returns (0,0) for a dupatta with no options — the bot
-        must fall back to base_price, never tell a customer the item is free."""
+    def test_never_quotes_zero_for_a_part(self):
+        """A dupatta with no options used to price_bounds() to (0,0). No part
+        carries a price now, so a "free" quote is impossible by construction."""
         Product.objects.create(
             name="Silk Dupatta", slug="silk-dupatta", kind=Product.Kind.DUPATTA,
             category="dupatta", base_price=Decimal("1600"), active=True,
@@ -81,7 +88,7 @@ class ShopFactsTests(TestCase):
         facts = _shop_facts()
         self.assertIn("Silk Dupatta", facts)
         self.assertNotIn("৳0", facts)
-        self.assertIn("1600", facts)
+        self.assertNotIn("1600", facts)
 
     def test_states_the_only_one_rule(self):
         for slug in ("book-x", "frame-x", "thumb-x"):
@@ -101,12 +108,36 @@ class ShopFactsTests(TestCase):
         )
         self.assertNotIn("একসাথে শুধু একটি নেওয়া যাবে", _shop_facts())
 
-    def test_unpriced_product_is_flagged_not_quoted(self):
-        Product.objects.create(
-            name="No Price Item", slug="no-price-item", kind=Product.Kind.DUPATTA,
-            category="x", base_price=Decimal("0"), active=True,
+    def test_only_listing_prices_are_quotable(self):
+        """The catalogue price a customer can actually see is the listing's."""
+        part = Product.objects.create(
+            name="Lone Book", slug="lone-book", kind=Product.Kind.LAYERED,
+            category="book", base_price=Decimal("1100"), active=True,
         )
+        combo = PrebuiltCombo.objects.create(
+            name="Book Listing", slug="book-listing", price=Decimal("1250"),
+            active=True,
+        )
+        combo.products.set([part])
+
         facts = _shop_facts()
-        self.assertIn("No Price Item", facts)
-        self.assertNotIn("৳0", facts)
-        self.assertIn("PRICE NOT SET", facts)
+        self.assertIn("1250", facts)      # what /products shows
+        self.assertNotIn("1100", facts)   # customizer-only, never quotable
+
+
+class BehaviorRuleTests(TestCase):
+    """Rules that stop the model filling gaps with plausible-looking numbers."""
+
+    def setUp(self):
+        from app.services.chatbot import _BEHAVIOR
+        self.rules = _BEHAVIOR
+
+    def test_numbers_must_be_copied_digit_for_digit(self):
+        # DeepSeek was re-typing ৳1250 as ৬২৫০ when writing Bengali numerals.
+        self.assertIn("Bengali numerals", self.rules)
+        self.assertIn("digit", self.rules)
+
+    def test_sizes_and_specs_may_not_be_invented(self):
+        # It answered "৮.৫ ইঞ্চি × ৬৬ ইঞ্চি" with no spec row in the DB at all.
+        self.assertIn("ইঞ্চি", self.rules)
+        self.assertIn("[HANDOFF]", self.rules)
