@@ -5,6 +5,7 @@ import { adminGet } from "@/lib/adminApi";
 import { SECTION_LABELS } from "@/lib/adminAuth";
 import {
   PageHeader, Card, Field, TextInput, Select, Table, Th, Td, AdminEmpty, Loading,
+  AdminButton,
 } from "@/components/admin/ui";
 
 interface AuditRow {
@@ -34,8 +35,19 @@ function fmtDate(iso: string): string {
   });
 }
 
+const PAGE_SIZE = 50;   // must match AuditLogPagination.page_size on the backend
+
+interface AuditPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: AuditRow[];
+}
+
 export default function AdminAudit() {
   const [rows, setRows] = useState<AuditRow[] | null>(null);
+  const [count, setCount] = useState(0);
+  const [page, setPage] = useState(1);
   const [user, setUser] = useState("");
   const [section, setSection] = useState("");
   const [start, setStart] = useState("");
@@ -43,26 +55,44 @@ export default function AdminAudit() {
   const [open, setOpen] = useState<number | null>(null);
   const [error, setError] = useState("");
 
+  /** Any filter change starts over at page 1 — page 7 of a 2-page result is
+   *  an empty screen that reads as "nothing logged". */
+  function filter<T>(set: (v: T) => void) {
+    return (v: T) => { set(v); setPage(1); setOpen(null); };
+  }
+
   const load = useCallback(async () => {
     const params = new URLSearchParams();
     if (user) params.set("user", user);
     if (section) params.set("section", section);
     if (start) params.set("start", start);
     if (end) params.set("end", end);
+    params.set("page", String(page));
     try {
-      const data = await adminGet<AuditRow[] | { results: AuditRow[] }>(
+      const data = await adminGet<AuditRow[] | AuditPage>(
         `audit-log/?${params.toString()}`,
       );
-      setRows(Array.isArray(data) ? data : data.results);
+      if (Array.isArray(data)) {          // unpaginated backend — one page of everything
+        setRows(data);
+        setCount(data.length);
+      } else {
+        setRows(data.results);
+        setCount(data.count);
+      }
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the audit log");
     }
-  }, [user, section, start, end]);
+  }, [user, section, start, end, page]);
 
   useEffect(() => {
     const t = setTimeout(load, 300);   // debounce the text filter
     return () => clearTimeout(t);
   }, [load]);
+
+  const pages = Math.max(1, Math.ceil(count / PAGE_SIZE));
+  const first = count === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const last = Math.min(page * PAGE_SIZE, count);
 
   return (
     <div>
@@ -76,12 +106,12 @@ export default function AdminAudit() {
           <Field label="User">
             <TextInput
               value={user}
-              onChange={(e) => setUser(e.target.value)}
+              onChange={(e) => filter(setUser)(e.target.value)}
               placeholder="username"
             />
           </Field>
           <Field label="Section">
-            <Select value={section} onChange={(e) => setSection(e.target.value)}>
+            <Select value={section} onChange={(e) => filter(setSection)(e.target.value)}>
               <option value="">All sections</option>
               {Object.entries(SECTION_LABELS).map(([key, label]) => (
                 <option key={key} value={key}>{label}</option>
@@ -89,10 +119,12 @@ export default function AdminAudit() {
             </Select>
           </Field>
           <Field label="From">
-            <TextInput type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+            <TextInput type="date" value={start}
+                       onChange={(e) => filter(setStart)(e.target.value)} />
           </Field>
           <Field label="To">
-            <TextInput type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+            <TextInput type="date" value={end}
+                       onChange={(e) => filter(setEnd)(e.target.value)} />
           </Field>
         </div>
       </Card>
@@ -150,6 +182,31 @@ export default function AdminAudit() {
             ))}
           </tbody>
         </Table>
+      )}
+
+      {rows && rows.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            {first}–{last} of {count.toLocaleString("en-US")}
+          </p>
+          <div className="flex items-center gap-2">
+            <AdminButton
+              variant="secondary"
+              disabled={page <= 1}
+              onClick={() => { setOpen(null); setPage((p) => Math.max(1, p - 1)); }}
+            >
+              Previous
+            </AdminButton>
+            <span className="text-xs text-slate-500">Page {page} of {pages}</span>
+            <AdminButton
+              variant="secondary"
+              disabled={page >= pages}
+              onClick={() => { setOpen(null); setPage((p) => Math.min(pages, p + 1)); }}
+            >
+              Next
+            </AdminButton>
+          </div>
+        </div>
       )}
 
       {open !== null && rows && (

@@ -15,6 +15,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from .models import AdminAuditLog, StaffProfile
@@ -207,6 +208,20 @@ class AuditLogSerializer(serializers.ModelSerializer):
                   "object_repr", "payload", "ip", "created_at"]
 
 
+class AuditLogPagination(PageNumberPagination):
+    """Pages, not a hard cap.
+
+    The list used to be sliced to the newest 500 rows, which silently hid
+    everything older — on a 180-day trail that is most of it, and the whole
+    point of the log is answering a question about something that already
+    happened. Paging keeps each response small AND every row reachable.
+    """
+
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
 class AdminAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """The trail is append-only: no create, no update, no delete — not even for
     the owner. A log you can edit answers nothing."""
@@ -215,6 +230,7 @@ class AdminAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     section = "audit"
     serializer_class = AuditLogSerializer
     queryset = AdminAuditLog.objects.all()
+    pagination_class = AuditLogPagination
 
     def get_queryset(self):
         qs = self.queryset.all()
@@ -227,4 +243,4 @@ class AdminAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(created_at__date__gte=params["start"])
         if params.get("end"):
             qs = qs.filter(created_at__date__lte=params["end"])
-        return qs[:500]
+        return qs

@@ -131,6 +131,54 @@ class AuditApiTests(TestCase):
                       format="json").status_code, 405)
 
 
+class AuditPaginationTests(TestCase):
+    """Pages, not a 500-row cliff: the oldest entry must stay reachable."""
+
+    def setUp(self):
+        self.owner = User.objects.create_superuser("owner", "o@x.com", "x")
+        self.api = client_for(self.owner)
+        AdminAuditLog.objects.bulk_create([
+            AdminAuditLog(username="mod", method="POST", path=f"/api/admin/x/{i}/",
+                          section="orders", status_code=200)
+            for i in range(120)
+        ])
+
+    def test_the_first_page_is_capped_and_reports_the_full_count(self):
+        body = self.api.get("/api/admin/audit-log/").json()
+        self.assertEqual(body["count"], 120)
+        self.assertEqual(len(body["results"]), 50)
+        self.assertIsNotNone(body["next"])
+        self.assertIsNone(body["previous"])
+
+    def test_later_pages_continue_without_repeating_a_row(self):
+        p1 = self.api.get("/api/admin/audit-log/?page=1").json()["results"]
+        p2 = self.api.get("/api/admin/audit-log/?page=2").json()["results"]
+        p3 = self.api.get("/api/admin/audit-log/?page=3").json()["results"]
+        self.assertEqual(len(p3), 20)                       # 120 = 50 + 50 + 20
+        ids = [r["id"] for r in p1 + p2 + p3]
+        self.assertEqual(len(set(ids)), 120)
+
+    def test_page_size_is_honoured_but_bounded(self):
+        body = self.api.get("/api/admin/audit-log/?page_size=10").json()
+        self.assertEqual(len(body["results"]), 10)
+
+        AdminAuditLog.objects.bulk_create([                 # 260 rows in total
+            AdminAuditLog(username="mod", method="POST", path="/y", status_code=200)
+            for _ in range(140)
+        ])
+        # A caller asking for everything still gets max_page_size, never the table.
+        capped = self.api.get("/api/admin/audit-log/?page_size=9999").json()
+        self.assertEqual(capped["count"], 260)
+        self.assertEqual(len(capped["results"]), 200)
+
+    def test_filters_page_the_filtered_set(self):
+        AdminAuditLog.objects.create(username="mod", method="POST", path="/x",
+                                     section="gallery", status_code=200)
+        body = self.api.get("/api/admin/audit-log/?section=gallery").json()
+        self.assertEqual(body["count"], 1)
+        self.assertIsNone(body["next"])
+
+
 class PurgeTests(TestCase):
     def test_purge_removes_only_entries_past_the_window(self):
         from django.core.management import call_command

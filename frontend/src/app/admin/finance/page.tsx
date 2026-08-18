@@ -17,7 +17,7 @@ import {
   createSupplier, deleteBuyer, deleteCreditPayment, deleteExpense,
   deleteFinanceCategory, deleteIncome, deleteSupplier, getLedger, listBuyers,
   listExpenses, listFinanceCategories, listIncomes, listSuppliers,
-  getFinanceMeta, getFinanceSummary, rangeDates, taka, updateBuyer,
+  getFinanceMeta, getFinanceSummary, longDate, rangeDates, taka, updateBuyer,
   updateCreditPayment, updateFinanceCategory, updateSupplier,
   type Buyer, type CreditKind, type CreditPayment, type Expense,
   type FinanceCategory, type FinanceMeta, type FinanceSummary, type Income,
@@ -699,7 +699,7 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
     <div className="mt-4 border-t border-slate-100 pt-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Statement — every credit and payment, oldest first
+          Statement — every credit and payment, newest first
         </p>
         <AdminButton
           variant="secondary"
@@ -722,9 +722,12 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
       )}
 
       <ul className="divide-y divide-slate-100">
-        {data.entries.map((e) => (
+        {/* Backend replays oldest-first (it computes the running balance that
+            way); only the display order flips. Per-row balance is not shown —
+            the footer total is the number that matters. */}
+        {[...data.entries].reverse().map((e) => (
           <li key={`${e.kind}${e.id}`} className="flex flex-wrap items-center gap-3 py-2 text-sm">
-            <span className="w-20 shrink-0 text-slate-400">{e.date}</span>
+            <span className="w-36 shrink-0 text-slate-400">{longDate(e.date)}</span>
             <span className="min-w-0 flex-1 truncate text-slate-700">
               {e.kind === "credit" ? e.label : `Payment — ${e.label}`}
               {e.kind === "payment" && e.fee_amount > 0 && (
@@ -735,9 +738,6 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
               e.kind === "credit" ? "text-slate-800" : "text-emerald-600"
             }`}>
               {e.kind === "credit" ? "+" : "−"} {taka(e.amount)}
-            </span>
-            <span className={`w-24 text-right font-semibold tabular-nums ${toneClass}`}>
-              {taka(e.balance)}
             </span>
             {e.kind === "payment" ? (
               <span className="flex gap-1">

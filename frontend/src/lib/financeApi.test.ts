@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { feeFromRate, isoDate, rangeDates, taka, vatInside } from "./financeApi";
+import { feeFromRate, isoDate, longDate, rangeDates, taka, vatInside } from "./financeApi";
+
+describe("longDate", () => {
+  it("renders dd-Month-yyyy", () => {
+    expect(longDate("2026-08-18")).toBe("18-August-2026");
+    expect(longDate("2026-01-01")).toBe("01-January-2026");
+    expect(longDate("2026-12-31")).toBe("31-December-2026");
+  });
+
+  it("does not shift the day in a timezone behind UTC", () => {
+    // `new Date("2026-08-18")` is UTC midnight = Aug 17 locally in the Americas.
+    expect(longDate("2026-08-18T00:00:00Z")).toBe("18-August-2026");
+  });
+
+  it("passes junk through instead of printing NaN", () => {
+    expect(longDate("")).toBe("");
+    expect(longDate("not a date")).toBe("not a date");
+    expect(longDate("2026-13-01")).toBe("2026-13-01");
+  });
+});
 
 describe("taka", () => {
   it("rounds and groups", () => {

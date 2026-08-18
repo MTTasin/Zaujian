@@ -271,6 +271,25 @@ export function taka(v: number | string): string {
   return `৳ ${Math.round(n).toLocaleString("en-US")}`;
 }
 
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * `2026-08-18` → `18-August-2026`. Split by hand rather than `new Date(iso)`:
+ * an ISO date string parses as UTC midnight, so a browser behind UTC renders
+ * the previous day — a statement row dated one day off is a real reading error.
+ * Anything that is not a plain ISO date is returned untouched.
+ */
+export function longDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  if (!m) return iso || "";
+  const month = MONTHS[parseInt(m[2], 10) - 1];
+  if (!month) return iso;
+  return `${m[3]}-${month}-${m[1]}`;
+}
+
 /**
  * Default MFS/transfer charge for an amount, from the account's percentage rate.
  * Only a PRE-FILL: flat charges (NPSB, agent fees) are typed in taka and stored
