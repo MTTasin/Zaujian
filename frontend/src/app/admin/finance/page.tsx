@@ -28,6 +28,7 @@ import {
   Table, Td, TextInput, Th,
 } from "@/components/admin/ui";
 import { EntryForm } from "@/components/admin/finance/EntryForm";
+import { ContactHistoryPanel } from "@/components/admin/finance/ContactHistoryPanel";
 import { Icon } from "@/components/ui/Icon";
 
 const PLUM = "var(--chart-plum)";
@@ -37,12 +38,13 @@ const RED = "var(--chart-red)";
 const PIE_COLORS = [PLUM, GOLD, GREEN, "var(--chart-blue)", "var(--chart-violet)",
   "var(--chart-amber)", RED];
 
-type Tab = "overview" | "expenses" | "income" | "credit" | "setup";
+type Tab = "overview" | "expenses" | "income" | "credit" | "contacts" | "setup";
 const TABS: { key: Tab; label: string; icon: Parameters<typeof Icon>[0]["name"] }[] = [
   { key: "overview", label: "Overview", icon: "chart" },
   { key: "expenses", label: "Expenses", icon: "cart" },
   { key: "income", label: "Income", icon: "wallet" },
   { key: "credit", label: "Credit", icon: "clock" },
+  { key: "contacts", label: "Contacts", icon: "user" },
   { key: "setup", label: "Categories", icon: "sliders" },
 ];
 
@@ -245,16 +247,17 @@ export default function AdminFinance() {
                 onChanged={() => { reload(); refreshContacts(); }} />
       )}
 
+      {tab === "contacts" && (
+        <Contacts suppliers={suppliers} buyers={buyers} onChanged={refreshContacts} />
+      )}
+
       {tab === "setup" && (
         <Setup
           expenseCats={expenseCats}
           incomeCats={incomeCats}
-          suppliers={suppliers}
-          buyers={buyers}
           onChanged={() => {
             listFinanceCategories("expense").then(setExpenseCats);
             listFinanceCategories("income").then(setIncomeCats);
-            refreshContacts();
           }}
         />
       )}
@@ -677,6 +680,10 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
   const [data, setData] = useState<Ledger | null>(null);
   const [paying, setPaying] = useState(false);
   const [editing, setEditing] = useState<CreditPayment | null>(null);
+  // Default to what is STILL OWED. The full replay answers a different question
+  // ("how did the balance get here"), and burying four live rows under twelve
+  // settled ones is how the page stopped answering the first one.
+  const [showAll, setShowAll] = useState(false);
 
   const load = useCallback(() => {
     getLedger(direction, contactId).then(setData).catch(() => setData(null));
@@ -687,6 +694,13 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
 
   const payable = direction === "payable";
   const toneClass = tone === "emerald" ? "text-emerald-700" : "text-amber-700";
+
+  // Newest first either way. Unpaid mode drops the payments too — they are
+  // already accounted for in what each remaining row still owes, and the rows
+  // shown add up to the balance exactly.
+  const rows = showAll
+    ? [...data.entries].reverse()
+    : [...data.entries].reverse().filter((e) => e.kind === "credit" && e.remaining > 0);
 
   async function removePayment(id: number) {
     if (!confirm("Delete this payment? The balance goes back up.")) return;
@@ -699,14 +713,21 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
     <div className="mt-4 border-t border-slate-100 pt-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Statement — every credit and payment, newest first
+          {showAll
+            ? "Statement — every credit and payment, newest first"
+            : payable ? "Still owed — unpaid credits" : "Still owed to you"}
         </p>
-        <AdminButton
-          variant="secondary"
-          onClick={() => { setEditing(null); setPaying((v) => !v); }}
-        >
-          {payable ? "Record payment" : "Record receipt"}
-        </AdminButton>
+        <div className="flex gap-2">
+          <AdminButton variant="secondary" onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "Unpaid only" : "Show all"}
+          </AdminButton>
+          <AdminButton
+            variant="secondary"
+            onClick={() => { setEditing(null); setPaying((v) => !v); }}
+          >
+            {payable ? "Record payment" : "Record receipt"}
+          </AdminButton>
+        </div>
       </div>
 
       {(paying || editing) && (
@@ -721,11 +742,17 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
         />
       )}
 
+      {!showAll && rows.length === 0 && (
+        <p className="py-3 text-sm text-slate-400">
+          Nothing outstanding — every credit has been paid off.
+        </p>
+      )}
+
       <ul className="divide-y divide-slate-100">
         {/* Backend replays oldest-first (it computes the running balance that
             way); only the display order flips. Per-row balance is not shown —
             the footer total is the number that matters. */}
-        {[...data.entries].reverse().map((e) => (
+        {rows.map((e) => (
           <li key={`${e.kind}${e.id}`} className="flex flex-wrap items-center gap-3 py-2 text-sm">
             <span className="w-36 shrink-0 text-slate-400">{longDate(e.date)}</span>
             <span className="min-w-0 flex-1 truncate text-slate-700">
@@ -739,6 +766,13 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
             }`}>
               {e.kind === "credit" ? "+" : "−"} {taka(e.amount)}
             </span>
+            {showAll && e.kind === "credit" && (
+              <span className="w-24 text-right text-xs">
+                {e.remaining > 0
+                  ? <span className="text-amber-600">{taka(e.remaining)} left</span>
+                  : <span className="text-emerald-600">settled</span>}
+              </span>
+            )}
             {e.kind === "payment" ? (
               <span className="flex gap-1">
                 <button
@@ -877,24 +911,52 @@ function CreditPaymentForm({
 // Setup — categories + suppliers
 // --------------------------------------------------------------------------- //
 
-function Setup({ expenseCats, incomeCats, suppliers, buyers, onChanged }: {
-  expenseCats: FinanceCategory[]; incomeCats: FinanceCategory[];
-  suppliers: Supplier[]; buyers: Buyer[]; onChanged: () => void;
+function Setup({ expenseCats, incomeCats, onChanged }: {
+  expenseCats: FinanceCategory[]; incomeCats: FinanceCategory[]; onChanged: () => void;
 }) {
   return (
     <div className="grid gap-5 lg:grid-cols-2">
       <CategoryEditor title="Expense categories" kind="expense" rows={expenseCats} onChanged={onChanged} />
       <CategoryEditor title="Income sources" kind="income" rows={incomeCats} onChanged={onChanged} />
+    </div>
+  );
+}
+
+/**
+ * Everyone money passes between — suppliers and buyers — each expandable into
+ * their COMPLETE history: credit purchases, cash purchases and payments.
+ *
+ * The Credit tab is about what is still owed; this is about the relationship,
+ * so someone you always pay cash still has a page here even though they never
+ * owe anything.
+ */
+function Contacts({ suppliers, buyers, onChanged }: {
+  suppliers: Supplier[]; buyers: Buyer[]; onChanged: () => void;
+}) {
+  return (
+    <div className="space-y-8">
+      <ContactGroup
+        title="Suppliers" hint="People you buy from."
+        direction="payable" tone="amber"
+        rows={suppliers.map((s) => ({ id: s.id, name: s.name, phone: s.phone, balance: s.due }))}
+        balanceLabel="owed"
+      />
       <ContactEditor
-        title="Suppliers" hint="People you buy from — they can be owed money."
+        title="Manage suppliers" hint="People you buy from — they can be owed money."
         rows={suppliers} balanceOf={(s) => s.due} tone="amber"
         onAdd={(name, phone) => createSupplier({ name, phone })}
         onEdit={(id, name, phone) => updateSupplier(id, { name, phone })}
         onRemove={deleteSupplier}
         onChanged={onChanged}
       />
+      <ContactGroup
+        title="Buyers" hint="People who buy from you."
+        direction="receivable" tone="emerald"
+        rows={buyers.map((b) => ({ id: b.id, name: b.name, phone: b.phone, balance: b.receivable }))}
+        balanceLabel="owes you"
+      />
       <ContactEditor
-        title="Buyers" hint="People who buy from you on credit — they can owe you."
+        title="Manage buyers" hint="People who buy from you on credit — they can owe you."
         rows={buyers} balanceOf={(b) => b.receivable} tone="emerald"
         onAdd={(name, phone) => createBuyer({ name, phone })}
         onEdit={(id, name, phone) => updateBuyer(id, { name, phone })}
@@ -902,6 +964,54 @@ function Setup({ expenseCats, incomeCats, suppliers, buyers, onChanged }: {
         onChanged={onChanged}
       />
     </div>
+  );
+}
+
+function ContactGroup({ title, hint, direction, tone, rows, balanceLabel }: {
+  title: string;
+  hint: string;
+  direction: CreditKind;
+  tone: "amber" | "emerald";
+  rows: { id: number; name: string; phone: string; balance: string }[];
+  balanceLabel: string;
+}) {
+  const [openId, setOpenId] = useState<number | null>(null);
+  const toneClass = tone === "emerald" ? "text-emerald-700" : "text-amber-700";
+
+  return (
+    <section>
+      <div className="mb-3">
+        <h2 className="font-bold text-slate-900">{title}</h2>
+        <p className="text-xs text-slate-400">{hint}</p>
+      </div>
+      {rows.length === 0 ? (
+        <AdminEmpty icon="user" title={`No ${title.toLowerCase()} yet`}
+                    hint="Add one below, then it can be picked on any entry." />
+      ) : (
+        <div className="space-y-3">
+          {rows.map((r) => (
+            <Card key={r.id} className="p-5">
+              <button
+                onClick={() => setOpenId(openId === r.id ? null : r.id)}
+                className="flex w-full cursor-pointer items-center gap-3 text-left"
+              >
+                <Icon name={openId === r.id ? "minus" : "plus"} size={16} />
+                <span className="flex-1 font-semibold text-slate-900">{r.name}</span>
+                {r.phone && <span className="text-xs text-slate-400">{r.phone}</span>}
+                {Number(r.balance) > 0 && (
+                  <span className={`text-xs font-semibold tabular-nums ${toneClass}`}>
+                    {taka(r.balance)} {balanceLabel}
+                  </span>
+                )}
+              </button>
+              {openId === r.id && (
+                <ContactHistoryPanel direction={direction} contactId={r.id} tone={tone} />
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

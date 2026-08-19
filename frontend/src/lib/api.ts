@@ -367,7 +367,9 @@ export interface ChatMsg {
   created_at: string;
 }
 export interface ChatState {
-  session: number;
+  // null until the customer actually sends something — opening the widget no
+  // longer creates a chat server-side.
+  session: number | null;
   status: string;
   messages: ChatMsg[];
 }

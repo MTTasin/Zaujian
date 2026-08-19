@@ -89,14 +89,10 @@ def steadfast_stats(phone):
         total = success + cancel
         ratio = round(success / total * 100, 2) if total else 0.0
 
-        # 4. Best-effort logout
-        try:
-            page = session.get(f"{base}/user/frauds/check", timeout=timeout)
-            lm = re.search(r'name="csrf-token"\s+content="(.*?)"', page.text)
-            if lm:
-                session.post(f"{base}/logout", data={"_token": lm.group(1)}, timeout=timeout)
-        except requests.RequestException:
-            pass
+        # No logout. It used to cost two more round trips (fetch the page for a
+        # CSRF token, then post it) AFTER the answer was already in hand — pure
+        # latency on the customer's checkout. The session is closed below and its
+        # cookies never leave this function.
 
         return {"success": success, "cancel": cancel, "total": total,
                 "success_ratio": ratio, "counts_available": True}
@@ -196,6 +192,32 @@ def pathao_stats(phone):
 # Aggregate + policy
 # --------------------------------------------------------------------------- #
 
+def _both_couriers(phone):
+    """Ask both couriers at once, and never let one break the other.
+
+    They share nothing, so running them one after the other simply added their
+    waits together on the customer's checkout request. Threads (not a queue —
+    there is no worker process here) mean the wait is the SLOWER courier, not the
+    sum. A courier that raises is reported as an error, exactly as a timeout is,
+    so `advance_required` still falls back to the safe default.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def guarded(fn, label):
+        def run():
+            try:
+                return fn(phone)
+            except Exception as exc:            # noqa: BLE001 - one courier, not both
+                logger.warning("%s fraud check crashed for %s: %s", label, phone, exc)
+                return _empty_stats(f"{label} request error")
+        return run
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        steadfast = pool.submit(guarded(steadfast_stats, "Steadfast"))
+        pathao = pool.submit(guarded(pathao_stats, "Pathao"))
+        return steadfast.result(), pathao.result()
+
+
 def check_phone(phone, refresh=False):
     """
     Run all couriers and aggregate. Returns a dict with per-courier stats, an
@@ -229,8 +251,7 @@ def check_phone(phone, refresh=False):
         except Exception:                  # noqa: BLE001 - cache down, just look it up
             logger.warning("fraud cache read failed", exc_info=True)
 
-    steadfast = steadfast_stats(norm)
-    pathao = pathao_stats(norm)
+    steadfast, pathao = _both_couriers(norm)
 
     # Only couriers that actually reported numbers are summed. Pathao v2 returns
     # a rating with NO counts, and folding its zeros in would quietly halve a

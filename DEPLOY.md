@@ -329,6 +329,42 @@ python manage.py purge_orphan_media
 - **Backend** (code change): upload → `python manage.py migrate` (if models changed) → `collectstatic --noinput` → `touch tmp/restart.txt`.
 - **Frontend** (code change): upload → `npm run build` → **Restart** Node app.
 
+## Serving `/media` without Python  (biggest remaining speed win)
+
+Every product photo currently goes through **Django → Passenger**. A Python
+worker is held for the whole transfer, which on a village 2G line is *seconds
+per image, per visitor* — and a page with ten photos holds ten of them. Nothing
+in the app can fix that; the file has to be served by the web server.
+
+Django now sends `Cache-Control: public, max-age=86400` on media (see
+`backend/app/media.py`), so a repeat visitor and the Cloudflare edge stop
+re-asking. That reduces the traffic; it does not remove Python from the first
+hit. To remove it entirely, on cPanel:
+
+1. **File Manager** → the backend app root (`backzaujain.mttasin.com`) → confirm
+   the `media/` folder is there and world-readable.
+2. Add to the domain's `.htaccess` (LiteSpeed reads it), **above** the Passenger
+   rules so it wins before the app is consulted:
+
+   ```apache
+   # Serve uploaded media straight off disk — never wake Python for a photo.
+   RewriteEngine On
+   RewriteRule ^media/(.*)$ - [L]
+
+   <IfModule mod_headers.c>
+     <FilesMatch "\.(jpe?g|png|webp|gif|svg|ico)$">
+       Header set Cache-Control "public, max-age=2592000"
+     </FilesMatch>
+   </IfModule>
+   ```
+3. Reload the site and open any product photo URL directly. It must still load,
+   and the response must NOT carry Passenger/Django headers.
+4. In Cloudflare, a **Cache Rule** on `/media/*` with "Cache Eligibility: Eligible
+   for cache" makes the edge answer most requests without touching the origin.
+
+If the alias ever breaks, Django still serves media as a fallback — the URL does
+not change, so nothing else needs touching.
+
 ## Gotchas
 - **`NEXT_PUBLIC_*` are compiled into the build** — change one → **rebuild** the frontend.
 - Change a **backend** env var → **restart** the Python app.

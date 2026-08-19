@@ -21,6 +21,7 @@ import {
   type Buyer, type FinanceCategory, type FinanceMeta, type Supplier,
 } from "@/lib/financeApi";
 import { EntryForm } from "@/components/admin/finance/EntryForm";
+import { ProfitEstimate } from "@/components/admin/ProfitEstimate";
 import { BD_LOCATIONS } from "@/lib/bdLocations";
 import { SITE_URL } from "@/lib/seo";
 import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, StatusPill, Loading } from "@/components/admin/ui";
@@ -1202,7 +1203,8 @@ function OrderFinanceMarks({ order }: { order: AdminOrder }) {
       ) : null}
     >
       <p className="mb-2 text-xs text-slate-400">
-        A reference only — these amounts are not costed against the order.
+        Marks are still only marks — no cash-book total moves. The estimate below
+        simply reads them.
       </p>
 
       {adding && (
@@ -1249,6 +1251,8 @@ function OrderFinanceMarks({ order }: { order: AdminOrder }) {
           </div>
         ))}
       </div>
+      {data?.profit && <ProfitEstimate p={data.profit} />}
+
       <div className="mt-2 border-t border-slate-100 pt-2 text-sm">
         <Link href="/admin/finance" className="font-semibold text-plum hover:underline">
           Open Finance →

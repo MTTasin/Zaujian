@@ -124,3 +124,84 @@ class AggregateTests(TestCase):
         result = fraud_check.check_phone("12345")
         self.assertTrue(result["advance_required"])
         self.assertIn("error", result)
+
+
+@override_settings(COURIER=CREDS)
+class CheckoutLatencyTests(TestCase):
+    """This runs INSIDE checkout, so every round trip is time the customer waits.
+
+    Two couriers that know nothing about each other were queried one after the
+    other, and Steadfast's lookup ended with a logout nobody reads.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    def test_the_two_couriers_are_queried_at_the_same_time(self):
+        import threading
+        import time
+
+        started = threading.Event()
+        overlapped = threading.Event()
+
+        def slow_steadfast(phone):
+            started.set()
+            time.sleep(0.3)
+            return {"success": 5, "cancel": 0, "total": 5,
+                    "success_ratio": 100.0, "counts_available": True}
+
+        def quick_pathao(phone):
+            # If the couriers were sequential this could not run until Steadfast
+            # had already returned.
+            if started.wait(timeout=1) and not slow_done.is_set():
+                overlapped.set()
+            return AggregateTests.RATING_ONLY
+
+        slow_done = threading.Event()
+
+        def steadfast(phone):
+            try:
+                return slow_steadfast(phone)
+            finally:
+                slow_done.set()
+
+        with patch("app.services.fraud_check.steadfast_stats", side_effect=steadfast), \
+             patch("app.services.fraud_check.pathao_stats", side_effect=quick_pathao):
+            result = fraud_check.check_phone("01711010782")
+
+        self.assertTrue(overlapped.is_set(), "couriers ran one after the other")
+        self.assertEqual(result["aggregate"]["total"], 5)
+        self.assertFalse(result["advance_required"])
+
+    def test_a_courier_that_raises_does_not_take_the_other_down(self):
+        def boom(phone):
+            raise RuntimeError("thread blew up")
+
+        good = {"success": 9, "cancel": 1, "total": 10,
+                "success_ratio": 90.0, "counts_available": True}
+        with patch("app.services.fraud_check.steadfast_stats", side_effect=boom), \
+             patch("app.services.fraud_check.pathao_stats", return_value=good):
+            result = fraud_check.check_phone("01711010782")
+
+        self.assertIn("error", result["steadfast"])
+        self.assertEqual(result["aggregate"]["total"], 10)
+        # A courier that crashed is a transient failure: never cached as policy.
+        self.assertIsNone(cache.get("fraud:01711010782"))
+
+    def test_steadfast_does_not_spend_two_round_trips_logging_out(self):
+        """The lookup is done by then; logging out only delays the customer."""
+        page = _Resp({})
+        page.text = '<input name="_token" value="tok">'
+        login = _Resp({})
+        data = _Resp({"total_delivered": 3, "total_cancelled": 0})
+
+        with patch("app.services.fraud_check.requests.Session") as session_cls:
+            session = session_cls.return_value
+            session.get.side_effect = [page, data]
+            session.post.return_value = login
+
+            stats = fraud_check.steadfast_stats("01711010782")
+
+        self.assertEqual(stats["success"], 3)
+        self.assertEqual(session.get.call_count, 2)    # login page + lookup
+        self.assertEqual(session.post.call_count, 1)   # login only

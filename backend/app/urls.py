@@ -105,6 +105,7 @@ urlpatterns = [
     path("admin/finance/summary/", finance_api.finance_summary, name="admin-finance-summary"),
     path("admin/finance/meta/", finance_api.finance_meta, name="admin-finance-meta"),
     path("admin/finance/ledger/", finance_api.finance_ledger, name="admin-finance-ledger"),
+    path("admin/finance/contact/", finance_api.finance_contact, name="admin-finance-contact"),
     path("admin/finance/order-search/", finance_api.finance_order_search,
          name="admin-finance-order-search"),
     path("admin/finance/order/<int:pk>/", finance_api.order_finance,

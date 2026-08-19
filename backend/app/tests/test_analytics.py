@@ -385,3 +385,37 @@ class CacheOutageTests(APITestCase):
             }, format="json")
         self.assertEqual(resp.status_code, 204)
         self.assertTrue(AnalyticsEvent.objects.filter(visitor_id="v9").exists())
+
+
+class TodayTotalsTests(TestCase):
+    """Today's headline numbers are computed live on every dashboard load, so
+    they must not scale with how busy today was."""
+
+    def setUp(self):
+        from django.test.utils import CaptureQueriesContext  # noqa: F401
+        self.now = timezone.now()
+        for i in range(6):
+            VisitorSession.objects.create(
+                session_id=f"s{i}", visitor_id=f"v{i}",
+                started_at=self.now - timedelta(seconds=100),
+                last_seen=self.now, pageviews=3,
+            )
+
+    def test_time_on_site_is_summed_by_the_database(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            totals = analytics.today_totals()
+
+        self.assertEqual(totals["sessions"], 6)
+        self.assertEqual(totals["avg_seconds"], 100)
+        # One aggregate + one pageview count. Never one row per session.
+        self.assertEqual(len(ctx.captured_queries), 2)
+
+    def test_an_empty_day_reports_zero_rather_than_dividing_by_it(self):
+        VisitorSession.objects.all().delete()
+        totals = analytics.today_totals()
+        self.assertEqual(totals["sessions"], 0)
+        self.assertEqual(totals["avg_seconds"], 0)
+        self.assertEqual(totals["bounce_rate"], 0)

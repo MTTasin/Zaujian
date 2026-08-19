@@ -168,6 +168,9 @@ export interface LedgerEntry {
   fee_amount: number;
   account: string;
   balance: number;
+  /** What THIS credit row still owes (0 = settled). Payments are always 0.
+   *  Display only — the contact's running balance is the money truth. */
+  remaining: number;
 }
 export interface Ledger {
   direction: CreditKind;
@@ -177,12 +180,65 @@ export interface Ledger {
 }
 export const getLedger = (direction: CreditKind, contact: number) =>
   adminGet<Ledger>(`finance/ledger/?direction=${direction}&contact=${contact}`);
+/**
+ * Everything that ever passed between us and one contact — credit purchases,
+ * CASH purchases and payments. Separate from the ledger above, which answers
+ * only "what is still owed".
+ *
+ * A cash row carries `affects_balance: false`: it belongs in the history, but
+ * nothing is owed on it and it never moves the balance.
+ */
+export interface ContactEntry {
+  kind: "credit" | "cash" | "payment";
+  id: number;
+  date: string;
+  label: string;
+  amount: number;
+  fee_amount: number;
+  account: string;
+  affects_balance: boolean;
+  remaining: number;
+  balance: number;
+}
+export interface ContactHistory {
+  direction: CreditKind;
+  contact: { id: number; name: string; phone: string; note: string };
+  balance: number;
+  totals: { bought: number; paid: number; balance: number };
+  entries: ContactEntry[];
+}
+export const getContactHistory = (direction: CreditKind, contact: number) =>
+  adminGet<ContactHistory>(`finance/contact/?direction=${direction}&contact=${contact}`);
+
 export const searchOrders = (q: string) =>
   adminGet<OrderMark[]>(`finance/order-search/?q=${encodeURIComponent(q)}`);
+/**
+ * Rough profit on one order, read out of the cash-book (backend does the maths —
+ * see app/services/profit.py). `null` for a cancelled order: it is not a sale.
+ *
+ * `shared_basis` / `courier_basis` say whether a line was derived from real rows
+ * or fell back, so the panel never shows a guess as if it were measured.
+ */
+export interface OrderProfit {
+  collected: number;
+  cost: number;
+  cost_marked: boolean;
+  shared: number;
+  shared_basis: "slice" | "not_billed";
+  courier: number;
+  courier_basis: "derived" | "fallback" | "none";
+  profit: number;
+  window_days: number;
+}
+
 export const getOrderFinance = (orderId: number) =>
-  adminGet<{ expenses: Expense[]; incomes: Income[]; expense_total: number; income_total: number }>(
-    `finance/order/${orderId}/`,
-  );
+  adminGet<{
+    expenses: Expense[];
+    incomes: Income[];
+    expense_total: number;
+    income_total: number;
+    profit: OrderProfit | null;
+  }>(`finance/order/${orderId}/`);
 
 // ---- categories ----
 export const listFinanceCategories = (kind?: FinanceKind) =>

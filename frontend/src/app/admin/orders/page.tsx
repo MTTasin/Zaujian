@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  adminGet, adminPost, deleteOrder, listOrderTags, markOrdersSeen, syncSteadfast,
-  ORDER_DELETABLE, ORDER_SORTS, ORDER_STATUSES,
-  type AdminOrderRow, type OrderTag,
+  adminGet, adminPost, deleteOrder, listOrderTags, markOrdersSeen, pageRows,
+  syncSteadfast, ORDER_DELETABLE, ORDER_SORTS, ORDER_STATUSES, PAGE_SIZE,
+  type AdminOrderRow, type OrderTag, type Paged,
 } from "@/lib/adminApi";
-import { PageHeader, Card, Select, TextInput, Table, Th, Td, AdminEmpty } from "@/components/admin/ui";
+import {
+  PageHeader, Card, Select, TextInput, Table, Th, Td, AdminEmpty, Pager,
+} from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
 import { useCanWrite } from "@/components/admin/AdminAuthProvider";
 import { OrderTagManager, TagChip } from "@/components/admin/OrderTags";
@@ -73,6 +75,8 @@ export default function AdminOrders() {
   // the backend refuses them anyway; this stops the page lying about it.
   const canWrite = useCanWrite("orders");
   const [orders, setOrders] = useState<AdminOrderRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");   // debounced value actually sent
@@ -95,6 +99,7 @@ export default function AdminOrders() {
   }, []);
   function changeSort(next: string) {
     setSort(next);
+    setPage(1);
     localStorage.setItem(SORT_KEY, next);
   }
   // Header click: first click applies `asc`, clicking the same column again flips.
@@ -105,7 +110,7 @@ export default function AdminOrders() {
 
   // Debounce the search box so we don't hit the API on every keystroke.
   useEffect(() => {
-    const t = setTimeout(() => setQuery(search.trim()), 300);
+    const t = setTimeout(() => { setQuery(search.trim()); setPage(1); }, 300);
     return () => clearTimeout(t);
   }, [search]);
 
@@ -115,12 +120,22 @@ export default function AdminOrders() {
     if (query) params.set("q", query);
     if (sort) params.set("sort", sort);
     if (tagFilter != null) params.set("tag", String(tagFilter));
-    const qs = params.toString();
-    adminGet<AdminOrderRow[]>(`orders/${qs ? `?${qs}` : ""}`)
-      .then(setOrders)
+    params.set("page", String(page));
+    adminGet<AdminOrderRow[] | Paged<AdminOrderRow>>(`orders/?${params.toString()}`)
+      .then((data) => {
+        const { rows, count } = pageRows(data);
+        setOrders(rows);
+        setTotal(count);
+      })
       .catch((e) => setError(e.message));
   }
-  useEffect(load, [filter, query, sort, tagFilter]);
+  useEffect(load, [filter, query, sort, tagFilter, page]);
+
+  // Sorting and filtering happen backend-side over the WHOLE set, so page 1 is
+  // always the top of the real ordering — but it has to BE page 1, or narrowing
+  // the list lands the admin on an empty page that reads as "no orders".
+  const showFilter = (v: string) => { setFilter(v); setPage(1); };
+  const showTag = (v: number | null) => { setTagFilter(v); setPage(1); };
 
   // Opening the Orders page acknowledges new orders → clears the badge + sound.
   useEffect(() => { markOrdersSeen().catch(() => {}); }, []);
@@ -219,7 +234,7 @@ export default function AdminOrders() {
             />
           </div>
           <div className="sm:w-48">
-            <Select value={filter} onChange={(e) => setFilter(e.target.value)}>
+            <Select value={filter} onChange={(e) => showFilter(e.target.value)}>
               <option value="">All statuses</option>
               {ORDER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
             </Select>
@@ -247,7 +262,7 @@ export default function AdminOrders() {
             <button
               key={s}
               data-order-status={s}
-              onClick={() => setFilter(filter === s ? "" : s)}
+              onClick={() => showFilter(filter === s ? "" : s)}
               aria-pressed={filter === s}
               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition ${
                 filter === s
@@ -276,7 +291,7 @@ export default function AdminOrders() {
           {tags.map((t) => (
             <button
               key={t.id}
-              onClick={() => setTagFilter(tagFilter === t.id ? null : t.id)}
+              onClick={() => showTag(tagFilter === t.id ? null : t.id)}
               aria-pressed={tagFilter === t.id}
               className={`rounded-full transition ${tagFilter === t.id ? "ring-2 ring-plum/40" : "opacity-80 hover:opacity-100"}`}
             >
@@ -284,7 +299,7 @@ export default function AdminOrders() {
             </button>
           ))}
           {tagFilter != null && (
-            <button onClick={() => setTagFilter(null)} className="text-xs font-medium text-plum hover:underline">
+            <button onClick={() => showTag(null)} className="text-xs font-medium text-plum hover:underline">
               clear
             </button>
           )}
@@ -432,6 +447,8 @@ export default function AdminOrders() {
           </tbody>
         </Table>
       )}
+
+      <Pager page={page} count={total} pageSize={PAGE_SIZE} onPage={setPage} />
     </div>
   );
 }

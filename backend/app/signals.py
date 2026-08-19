@@ -8,7 +8,6 @@ and getting a stale price in front of a customer is worse than a rebuild.
 """
 
 from django.db.models.signals import post_delete, post_save
-from django.dispatch import receiver
 
 from .models import (
     ColorOption,
@@ -38,8 +37,20 @@ CATALOGUE_MODELS = (
 )
 
 
-@receiver(post_save)
-@receiver(post_delete)
 def _invalidate_catalogue(sender, **kwargs):
-    if sender in CATALOGUE_MODELS:
-        bump_catalogue()
+    bump_catalogue()
+
+
+# Connected per model rather than as a bare `@receiver(post_save)`. A senderless
+# receiver is called for EVERY write in the project — every chat message, every
+# analytics session heartbeat, every audit row — just to discover it is not a
+# catalogue model. Naming the senders means Django never dispatches to us at all.
+for _model in CATALOGUE_MODELS:
+    post_save.connect(
+        _invalidate_catalogue, sender=_model,
+        dispatch_uid=f"catalogue_bump_save_{_model.__name__}",
+    )
+    post_delete.connect(
+        _invalidate_catalogue, sender=_model,
+        dispatch_uid=f"catalogue_bump_delete_{_model.__name__}",
+    )

@@ -22,32 +22,66 @@ export default function AdminChats() {
   const lastId = useRef(0);
   const boxRef = useRef<HTMLDivElement>(null);
 
-  const loadSessions = useCallback(() => {
-    adminGet<AdminChatSession[]>("chats/").then(setSessions).catch(() => {});
+  // A poll must never queue on itself: while one request is in flight, or while
+  // the tab is in the background, the tick is skipped entirely. A fixed interval
+  // with no guard is fine against a warm server and ruinous against a cold one.
+  const sessionsBusy = useRef(false);
+  const loadSessions = useCallback(async () => {
+    if (sessionsBusy.current || document.hidden) return;
+    sessionsBusy.current = true;
+    try {
+      const data = await adminGet<AdminChatSession[] | { results: AdminChatSession[] }>(
+        "chats/",
+      );
+      setSessions(Array.isArray(data) ? data : data.results);
+    } catch {
+      /* a failed poll just waits for the next tick */
+    } finally {
+      sessionsBusy.current = false;
+    }
   }, []);
   useEffect(() => {
-    loadSessions();
+    const first = setTimeout(loadSessions, 0);   // after the first paint
     const iv = setInterval(loadSessions, 6000);
-    return () => clearInterval(iv);
+    // Coming back to the tab should be current at once, not up to 6s later.
+    document.addEventListener("visibilitychange", loadSessions);
+    return () => {
+      clearTimeout(first);
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", loadSessions);
+    };
   }, [loadSessions]);
 
   // Poll messages of the open conversation.
   useEffect(() => {
     if (active == null) return;
     lastId.current = 0; setMsgs([]);
+    let busy = false;
     const tick = async () => {
-      const d = await adminGet<{ status: string; messages: AdminChatMessage[] }>(
-        `chats/${active}/messages/?after=${lastId.current}`);
-      setStatus(d.status);
-      if (d.messages.length) {
-        setMsgs((m) => [...m, ...d.messages]);
-        lastId.current = d.messages[d.messages.length - 1].id;
-        setTimeout(() => boxRef.current?.scrollTo(0, boxRef.current.scrollHeight), 50);
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const d = await adminGet<{ status: string; messages: AdminChatMessage[] }>(
+          `chats/${active}/messages/?after=${lastId.current}`);
+        setStatus(d.status);
+        if (d.messages.length) {
+          setMsgs((m) => [...m, ...d.messages]);
+          lastId.current = d.messages[d.messages.length - 1].id;
+          setTimeout(() => boxRef.current?.scrollTo(0, boxRef.current.scrollHeight), 50);
+        }
+      } finally {
+        busy = false;
       }
     };
-    tick().catch(() => {});
+    const first = setTimeout(() => tick().catch(() => {}), 0);
     const iv = setInterval(() => tick().catch(() => {}), 4000);
-    return () => clearInterval(iv);
+    const onVisible = () => { tick().catch(() => {}); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearTimeout(first);
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [active]);
 
   async function reply(e: React.FormEvent) {

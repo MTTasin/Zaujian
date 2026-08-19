@@ -44,6 +44,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
 from .permissions import SectionViewSetMixin, section_access
+from .services import profit
 
 from .models import (
     Buyer,
@@ -648,6 +649,10 @@ def contact_ledger(direction, contact_id):
         })
 
     entries.sort(key=lambda r: (r["date"], 0 if r["kind"] == "credit" else 1, r["id"]))
+    # What each credit row still owes, so the statement can show only the ones
+    # still owing. Derived oldest-first (`credit_allocation`) — nothing stored,
+    # and the contact's running balance is still the money truth.
+    remaining = credit_allocation(direction, [contact_id])
     running = ZERO
     out = []
     for r in entries:
@@ -657,8 +662,97 @@ def contact_ledger(direction, contact_id):
             "label": r["label"], "amount": float(r["amount"]),
             "fee_amount": float(r["fee_amount"]), "account": r["account"],
             "balance": float(running),
+            "remaining": float(remaining.get(r["id"], ZERO)) if r["kind"] == "credit" else 0,
         })
     return out
+
+
+def contact_history(direction, contact_id):
+    """EVERYTHING between us and one contact, not just what is owed.
+
+    The Credit tab answers "what do I still owe for?" and so shows credit rows
+    only. This answers "what has passed between us?", which includes the
+    dupattas paid for in cash — they are part of the relationship even though
+    nothing is owed on them.
+
+    That distinction is load-bearing: a cash purchase carries
+    `affects_balance: False` and never touches the running balance. Folding it
+    in would inflate the due by money that already left the account.
+    """
+    if direction == "payable":
+        contact = Supplier.objects.filter(pk=contact_id).first()
+        rows = Expense.objects.filter(supplier_id=contact_id).select_related("category")
+        payments = CreditPayment.objects.filter(
+            kind=CreditPayment.Kind.PAYABLE, supplier_id=contact_id)
+        moved_label = "Paid"
+    else:
+        contact = Buyer.objects.filter(pk=contact_id).first()
+        rows = Income.objects.filter(buyer_id=contact_id).select_related("category")
+        payments = CreditPayment.objects.filter(
+            kind=CreditPayment.Kind.RECEIVABLE, buyer_id=contact_id)
+        moved_label = "Received"
+    if contact is None:
+        return None
+
+    remaining = credit_allocation(direction, [contact_id])
+    entries, bought, settled_in_cash = [], ZERO, ZERO
+    for r in rows:
+        bought += r.amount
+        if not r.is_credit:
+            settled_in_cash += r.amount
+        entries.append({
+            "kind": "credit" if r.is_credit else "cash",
+            "id": r.id,
+            "date": r.date,
+            "label": r.description or r.category.name,
+            "amount": r.amount,
+            "fee_amount": r.fee_amount,
+            "account": r.account,
+            "affects_balance": r.is_credit,
+            "remaining": remaining.get(r.id, ZERO) if r.is_credit else ZERO,
+        })
+
+    paid = ZERO
+    for p in payments:
+        paid += p.amount
+        entries.append({
+            "kind": "payment", "id": p.id, "date": p.date,
+            "label": p.note or moved_label, "amount": p.amount,
+            "fee_amount": p.fee_amount, "account": p.account,
+            "affects_balance": True, "remaining": ZERO,
+        })
+
+    entries.sort(key=lambda r: (r["date"], 0 if r["kind"] != "payment" else 1, r["id"]))
+
+    running = ZERO
+    out = []
+    for r in entries:
+        if r["affects_balance"]:
+            running += r["amount"] if r["kind"] == "credit" else -r["amount"]
+        out.append({
+            **r,
+            "date": r["date"].isoformat(),
+            "amount": float(r["amount"]),
+            "fee_amount": float(r["fee_amount"]),
+            "remaining": float(r["remaining"]),
+            "balance": float(running),
+        })
+
+    return {
+        "direction": direction,
+        "contact": {"id": contact.id, "name": contact.name, "phone": contact.phone,
+                    "note": contact.note},
+        "balance": float(contact_balance(direction, contact)),
+        "totals": {
+            # Everything ever traded, however it was paid for.
+            "bought": float(bought),
+            # Money that actually changed hands: payments against the balance,
+            # plus the rows that were settled on the spot.
+            "paid": float(paid + settled_in_cash),
+            "balance": float(contact_balance(direction, contact)),
+        },
+        "entries": out,
+    }
 
 
 def cash_out(start, end):
@@ -846,6 +940,29 @@ def finance_ledger(request):
 
 @api_view(["GET"])
 @permission_classes([section_access("finance")])
+def finance_contact(request):
+    """Everything that ever passed between us and one contact — credit purchases,
+    CASH purchases and payments — with the totals.
+
+    Separate from `finance_ledger` on purpose: that one answers "what is still
+    owed" and shows credit rows only, this one answers "what is our history".
+    """
+    direction = request.query_params.get("direction")
+    if direction not in ("payable", "receivable"):
+        return Response({"error": "direction must be payable or receivable"},
+                        status=status.HTTP_400_BAD_REQUEST)
+    contact_id = request.query_params.get("contact")
+    if not contact_id:
+        return Response({"error": "contact is required"},
+                        status=status.HTTP_400_BAD_REQUEST)
+    data = contact_history(direction, contact_id)
+    if data is None:
+        return Response({"error": "Unknown contact"}, status=status.HTTP_404_NOT_FOUND)
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([section_access("finance")])
 def finance_meta(request):
     """Form options: accounts + their default fee rate (a pre-fill, never a rule —
     flat charges like NPSB are typed in taka)."""
@@ -882,6 +999,11 @@ def order_finance(request, pk):
                 .select_related("category", "supplier").prefetch_related("orders"))
     incomes = (Income.objects.filter(orders__id=pk)
                .select_related("category").prefetch_related("orders"))
+    # A rough profit READ off the same marks — see services/profit.py. It stores
+    # nothing and allocates nothing; a mark is still only a mark.
+    order = Order.objects.filter(pk=pk).first()
+    estimate = profit.estimate(order) if order else None
+
     return Response({
         "expenses": ExpenseSerializer(expenses, many=True, context={"request": request}).data,
         "incomes": IncomeSerializer(incomes, many=True, context={"request": request}).data,
@@ -889,4 +1011,8 @@ def order_finance(request, pk):
         # Cash received against this order's marked incomes (a credit sale
         # counts only as far as it has been paid).
         "income_total": float(sum((i.net_amount for i in incomes), ZERO)),
+        "profit": {
+            k: (float(v) if isinstance(v, Decimal) else v)
+            for k, v in estimate.items()
+        } if estimate else None,
     })

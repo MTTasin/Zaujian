@@ -10,6 +10,7 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from rest_framework.test import APITestCase
 
+from app.tests.helpers import rows
 from app.models import Order, OrderTag
 
 TAGS = "/api/admin/order-tags/"
@@ -108,28 +109,28 @@ class OrderTagApiTests(APITestCase):
         tag = OrderTag.objects.create(name="urgent")
         self._set(self.order, tags=[tag.id])
         for value in (tag.id, "urgent", "URGENT"):
-            rows = self.client.get(f"/api/admin/orders/?tag={value}").json()
-            self.assertEqual([r["uid"] for r in rows], [self.order.uid], f"tag={value}")
+            found = rows(self.client.get(f"/api/admin/orders/?tag={value}"))
+            self.assertEqual([r["uid"] for r in found], [self.order.uid], f"tag={value}")
 
     def test_searching_a_tag_name_finds_the_orders_carrying_it(self):
         tag = OrderTag.objects.create(name="giftwrap")
         self._set(self.order, tags=[tag.id])
-        rows = self.client.get("/api/admin/orders/?q=giftwrap").json()
-        self.assertEqual([r["uid"] for r in rows], [self.order.uid])
+        found = rows(self.client.get("/api/admin/orders/?q=giftwrap"))
+        self.assertEqual([r["uid"] for r in found], [self.order.uid])
 
     def test_search_does_not_duplicate_an_order_with_several_matching_tags(self):
         for name in ("gift", "giftwrap"):
             tag = OrderTag.objects.create(name=name)
             self.order.tags.add(tag)
-        rows = self.client.get("/api/admin/orders/?q=gift").json()
-        self.assertEqual(len(rows), 1)
+        found = rows(self.client.get("/api/admin/orders/?q=gift"))
+        self.assertEqual(len(found), 1)
 
     def test_the_list_carries_tags_without_a_query_per_order(self):
         tag = OrderTag.objects.create(name="urgent")
         self.order.tags.add(tag)
-        rows = self.client.get("/api/admin/orders/").json()
-        self.assertEqual(len(rows), 2)
-        by_uid = {r["uid"]: r for r in rows}
+        found = rows(self.client.get("/api/admin/orders/"))
+        self.assertEqual(len(found), 2)
+        by_uid = {r["uid"]: r for r in found}
         self.assertEqual(by_uid[self.order.uid]["tags"][0]["name"], "urgent")
         self.assertEqual(by_uid[self.other.uid]["tags"], [])
 
@@ -176,7 +177,7 @@ class OrderIdSearchTests(APITestCase):
         self.decoy = Order.objects.create(customer_name="Karim", phone="0199999999")
 
     def _uids(self, q):
-        return [r["uid"] for r in self.client.get(f"/api/admin/orders/?q={q}").json()]
+        return [r["uid"] for r in rows(self.client.get(f"/api/admin/orders/?q={q}"))]
 
     def test_searching_the_id_finds_that_order(self):
         self.assertEqual(self._uids(self.order.id), [self.order.uid])
@@ -190,8 +191,8 @@ class OrderIdSearchTests(APITestCase):
         self.assertIn(target.uid, found)
 
     def test_the_list_carries_the_id(self):
-        rows = self.client.get("/api/admin/orders/").json()
-        self.assertTrue(all("id" in r for r in rows))
+        found = rows(self.client.get("/api/admin/orders/"))
+        self.assertTrue(all("id" in r for r in found))
 
     def test_a_long_digit_string_is_not_treated_as_an_id(self):
         # int() on a 20-digit phone number would still work, but a row id that

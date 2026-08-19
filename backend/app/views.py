@@ -500,15 +500,21 @@ def custom_request(request):
 # Chatbot (public)
 # --------------------------------------------------------------------------- #
 
-def _chat_session(request):
-    """Get or create the active (non-closed) chat session for this browser token."""
+def _find_chat_session(request):
+    """The active (non-closed) chat for this browser token, or None."""
     token = request.headers.get("X-Cart-Token") or _cart_key(request)
-    session = (
+    return (
         ChatSession.objects.filter(token=token)
         .exclude(status=ChatSession.Status.CLOSED)
         .first()
     )
+
+
+def _chat_session(request):
+    """Get or create the active (non-closed) chat session for this browser token."""
+    session = _find_chat_session(request)
     if session is None:
+        token = request.headers.get("X-Cart-Token") or _cart_key(request)
         session = ChatSession.objects.create(token=token)
     return session
 
@@ -586,8 +592,17 @@ def gallery_detail(request, slug):
 
 @api_view(["GET"])
 def chat_poll(request):
-    """Customer polls for new messages (admin replies, etc.)."""
-    session = _chat_session(request)
+    """Customer polls for new messages (admin replies, etc.).
+
+    Deliberately does NOT create a session: opening the widget is not a
+    conversation, and a row per curious visitor grew the table the admin's polled
+    Live Chats list reads. The session is created by the first message sent.
+    """
+    session = _find_chat_session(request)
+    if session is None:
+        return Response({
+            "session": None, "status": ChatSession.Status.BOT, "messages": [],
+        })
     after = request.query_params.get("after")
     qs = session.messages.all()
     if after:

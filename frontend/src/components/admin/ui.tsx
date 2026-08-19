@@ -211,6 +211,42 @@ export function Loading({ label = "Loading…" }: { label?: string }) {
   );
 }
 
+export function Pager({
+  page,
+  count,
+  pageSize = 50,
+  onPage,
+}: {
+  page: number;
+  count: number;
+  pageSize?: number;
+  onPage: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(count / pageSize));
+  if (count <= pageSize) return null;      // one page: the controls are noise
+  const first = count === 0 ? 0 : (page - 1) * pageSize + 1;
+  const last = Math.min(page * pageSize, count);
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+      <p className="text-xs text-slate-500">
+        {first}–{last} of {count.toLocaleString("en-US")}
+      </p>
+      <div className="flex items-center gap-2">
+        <AdminButton variant="secondary" disabled={page <= 1}
+                     onClick={() => onPage(Math.max(1, page - 1))}>
+          Previous
+        </AdminButton>
+        <span className="text-xs text-slate-500">Page {page} of {pages}</span>
+        <AdminButton variant="secondary" disabled={page >= pages}
+                     onClick={() => onPage(Math.min(pages, page + 1))}>
+          Next
+        </AdminButton>
+      </div>
+    </div>
+  );
+}
+
 export function AdminEmpty({
   icon = "box",
   title,

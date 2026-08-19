@@ -16,7 +16,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from django.core.cache import cache
-from django.db.models import Count, Q
+from django.db.models import Count, DurationField, F, Q, Sum
 from django.utils import timezone
 
 from ..models import AnalyticsEvent, VisitorSession
@@ -330,9 +330,13 @@ def today_totals(date=None):
         new=Count("id", filter=Q(is_new_visitor=True)),
         bounced=Count("id", filter=Q(pageviews__lte=1)),
         converted=Count("id", filter=Q(converted=True)),
+        # Time on site is summed by the DATABASE. Pulling every session row of a
+        # busy day into Python to add up one number is the kind of thing that is
+        # invisible in dev and heavy on the day it matters.
+        duration=Sum(F("last_seen") - F("started_at"), output_field=DurationField()),
     )
     pageviews = AnalyticsEvent.objects.filter(ts__date=day, name="pageview").count()
-    seconds = sum(s.seconds for s in sessions.only("started_at", "last_seen"))
+    seconds = max(int((agg["duration"] or timedelta()).total_seconds()), 0)
     total = agg["total"] or 0
     return {
         "date": day.isoformat(),

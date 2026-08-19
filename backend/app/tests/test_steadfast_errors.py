@@ -24,6 +24,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 
+from app.tests.helpers import rows
 from app.models import ExtraConsignment, Order
 from app.services import steadfast_order
 from app.services.steadfast_order import ConsignmentGoneError, SteadfastError
@@ -132,7 +133,7 @@ class CourierActionStatusCodeTests(APITestCase):
         self.order.save(update_fields=["consignment_missing"])
         detail = self.client.get(f"/api/admin/orders/{self.order.id}/").json()
         self.assertTrue(detail["consignment_missing"])
-        row = next(o for o in self.client.get("/api/admin/orders/").json()
+        row = next(o for o in rows(self.client.get("/api/admin/orders/"))
                    if o["id"] == self.order.id)
         self.assertTrue(row["consignment_missing"])
 

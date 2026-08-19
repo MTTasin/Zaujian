@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { adminGet } from "@/lib/adminApi";
-import { PageHeader, Card, Table, Th, Td, AdminEmpty, Loading } from "@/components/admin/ui";
+import { adminGet, pageRows, PAGE_SIZE, type Paged } from "@/lib/adminApi";
+import {
+  PageHeader, Table, Th, Td, AdminEmpty, Loading, Pager,
+} from "@/components/admin/ui";
 
 interface CapiEvent {
   id: number;
@@ -26,11 +28,19 @@ const STATUS: Record<string, string> = {
 
 export default function AdminCapiEvents() {
   const [events, setEvents] = useState<CapiEvent[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    adminGet<CapiEvent[]>("capi-events/").then(setEvents).catch((e) => setError(e.message));
-  }, []);
+    adminGet<CapiEvent[] | Paged<CapiEvent>>(`capi-events/?page=${page}`)
+      .then((data) => {
+        const { rows, count } = pageRows(data);
+        setEvents(rows);
+        setTotal(count);
+      })
+      .catch((e) => setError(e.message));
+  }, [page]);
 
   if (error) return <p className="rounded-lg bg-red-50 p-4 text-sm text-red-600">{error}</p>;
   if (!events) return <Loading />;
@@ -67,6 +77,8 @@ export default function AdminCapiEvents() {
           </tbody>
         </Table>
       )}
+
+      <Pager page={page} count={total} pageSize={PAGE_SIZE} onPage={setPage} />
     </div>
   );
 }

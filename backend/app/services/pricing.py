@@ -40,16 +40,21 @@ def price_bounds(product):
         return base + (agg["lo"] or Decimal("0")), base + (agg["hi"] or Decimal("0"))
 
     # layered: color required (min/max), overlays + inside optional (+0 .. +max)
+    from django.db.models import Q  # local import to avoid cycles
+
     lo = hi = base
     colors = product.colors.filter(active=True).aggregate(
         lo=Min("price_modifier"), hi=Max("price_modifier"))
     if colors["lo"] is not None:
         lo += colors["lo"]
         hi += colors["hi"]
-    for placement in (ToppingDesign.Placement.CORNER, ToppingDesign.Placement.CENTER):
-        top = product.toppings.filter(active=True, placement=placement).aggregate(
-            hi=Max("price_modifier"))
-        hi += top["hi"] or Decimal("0")
+    # Corner and center are rows of the SAME table, so they are one grouped read,
+    # not one query per placement — this runs for every product in the catalogue.
+    tops = product.toppings.filter(active=True).aggregate(
+        corner=Max("price_modifier", filter=Q(placement=ToppingDesign.Placement.CORNER)),
+        center=Max("price_modifier", filter=Q(placement=ToppingDesign.Placement.CENTER)),
+    )
+    hi += (tops["corner"] or Decimal("0")) + (tops["center"] or Decimal("0"))
     ins = product.inside_designs.filter(active=True).aggregate(hi=Max("price_modifier"))
     hi += ins["hi"] or Decimal("0")
     return lo, hi

@@ -60,7 +60,9 @@ export default function ChatWidget() {
     if (!open) return;
     let active = true;
     const tick = async () => {
-      if (busyRef.current) return;
+      // Skip while a send is in flight or the tab is in the background — a
+      // backgrounded phone should not keep waking the server every 4s.
+      if (busyRef.current || document.hidden) return;
       try {
         const s = await chatPoll(maxId(msgsRef.current));
         if (active) {

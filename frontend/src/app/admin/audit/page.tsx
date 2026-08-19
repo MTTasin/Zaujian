@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { adminGet } from "@/lib/adminApi";
+import { adminGet, PAGE_SIZE, type Paged } from "@/lib/adminApi";
 import { SECTION_LABELS } from "@/lib/adminAuth";
 import {
   PageHeader, Card, Field, TextInput, Select, Table, Th, Td, AdminEmpty, Loading,
-  AdminButton,
+  Pager,
 } from "@/components/admin/ui";
 
 interface AuditRow {
@@ -35,15 +35,6 @@ function fmtDate(iso: string): string {
   });
 }
 
-const PAGE_SIZE = 50;   // must match AuditLogPagination.page_size on the backend
-
-interface AuditPage {
-  count: number;
-  next: string | null;
-  previous: string | null;
-  results: AuditRow[];
-}
-
 export default function AdminAudit() {
   const [rows, setRows] = useState<AuditRow[] | null>(null);
   const [count, setCount] = useState(0);
@@ -69,7 +60,7 @@ export default function AdminAudit() {
     if (end) params.set("end", end);
     params.set("page", String(page));
     try {
-      const data = await adminGet<AuditRow[] | AuditPage>(
+      const data = await adminGet<AuditRow[] | Paged<AuditRow>>(
         `audit-log/?${params.toString()}`,
       );
       if (Array.isArray(data)) {          // unpaginated backend — one page of everything
@@ -89,10 +80,6 @@ export default function AdminAudit() {
     const t = setTimeout(load, 300);   // debounce the text filter
     return () => clearTimeout(t);
   }, [load]);
-
-  const pages = Math.max(1, Math.ceil(count / PAGE_SIZE));
-  const first = count === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
-  const last = Math.min(page * PAGE_SIZE, count);
 
   return (
     <div>
@@ -184,30 +171,13 @@ export default function AdminAudit() {
         </Table>
       )}
 
-      {rows && rows.length > 0 && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-slate-500">
-            {first}–{last} of {count.toLocaleString("en-US")}
-          </p>
-          <div className="flex items-center gap-2">
-            <AdminButton
-              variant="secondary"
-              disabled={page <= 1}
-              onClick={() => { setOpen(null); setPage((p) => Math.max(1, p - 1)); }}
-            >
-              Previous
-            </AdminButton>
-            <span className="text-xs text-slate-500">Page {page} of {pages}</span>
-            <AdminButton
-              variant="secondary"
-              disabled={page >= pages}
-              onClick={() => { setOpen(null); setPage((p) => Math.min(pages, p + 1)); }}
-            >
-              Next
-            </AdminButton>
-          </div>
-        </div>
-      )}
+      <Pager
+        page={page}
+        count={count}
+        pageSize={PAGE_SIZE}
+        onPage={(p) => { setOpen(null); setPage(p); }}
+      />
+
 
       {open !== null && rows && (
         <Card className="mt-4 p-4">

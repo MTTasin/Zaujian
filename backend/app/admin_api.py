@@ -14,12 +14,14 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import update_last_login
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 
+from .pagination import AdminPagination
 from .permissions import (
     AnyStaffPermission,
     OwnerPermission,
@@ -647,6 +649,7 @@ class AdminLeadViewSet(SectionViewSetMixin, viewsets.ModelViewSet):
 
     queryset = Lead.objects.all()
     serializer_class = AdminLeadSerializer
+    pagination_class = AdminPagination
 
     def perform_create(self, serializer):
         self._fire(serializer.save())
@@ -679,6 +682,9 @@ class AdminCapiEventViewSet(SectionViewSetMixin, viewsets.ReadOnlyModelViewSet):
     section = "capi"
     queryset = CapiEvent.objects.all()
     serializer_class = AdminCapiEventSerializer
+    # One row per order and per lead, kept as an audit trail — this is the
+    # fastest-growing table in the panel.
+    pagination_class = AdminPagination
 
 
 class AdminColorViewSet(_AdminBase):
@@ -952,6 +958,11 @@ class AdminOrderViewSet(SectionViewSetMixin, mixins.DestroyModelMixin, viewsets.
     serializer_class = AdminOrderSerializer
     queryset = Order.objects.all().prefetch_related(
         "items", "extra_consignments__events", "consignment_events", "tags")
+    # Orders are never deleted, so an unpaginated list is a payload that grows
+    # every week forever. The query count is already flat (see the list
+    # serializer); this bounds the rows. Sorting/filtering stay backend-side, so
+    # page 1 is still the top of the whole ordered set, not of a slice.
+    pagination_class = AdminPagination
 
     def get_serializer_class(self):
         # Only the list is trimmed. Every action that answers with ONE order —
@@ -2097,13 +2108,27 @@ class AdminChatSessionViewSet(SectionViewSetMixin, viewsets.ReadOnlyModelViewSet
     section = "chats"
     serializer_class = ChatSessionSerializer
     queryset = ChatSession.objects.all()
+    pagination_class = AdminPagination
 
     def get_queryset(self):
         qs = super().get_queryset()
         st = self.request.query_params.get("status")
         if st:
             qs = qs.filter(status=st)
-        return qs
+        # The preview and the unread badge come back with the row. As method
+        # fields they were two queries PER SESSION on a list that polls every few
+        # seconds — the cost of the page grew with every chat ever opened.
+        return qs.annotate(
+            last_text=Subquery(
+                ChatMessage.objects.filter(session=OuterRef("pk"))
+                .order_by("-id").values("text")[:1]
+            ),
+            unread_count=Count(
+                "messages",
+                filter=Q(messages__role=ChatMessage.Role.CUSTOMER,
+                         messages__read_by_admin=False),
+            ),
+        )
 
     @action(detail=True, methods=["get"])
     def messages(self, request, pk=None):

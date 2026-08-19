@@ -10,6 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from app.admin_api import AdminOrderViewSet
+from app.tests.helpers import rows
 from app.models import CartItem, Expense, FinanceCategory, Income, Order, Product
 
 
@@ -112,7 +113,7 @@ class OrderListCostTests(APITestCase):
 
     def test_the_list_stays_light_but_keeps_what_the_page_renders(self):
         self._make(1)
-        row = self.client.get("/api/admin/orders/").json()[0]
+        row = rows(self.client.get("/api/admin/orders/"))[0]
         for field in ("uid", "customer_name", "phone", "total", "status",
                       "status_display", "payment_verified", "courier_submitted",
                       "is_repeat_customer", "created_at", "marked_count"):
@@ -165,7 +166,7 @@ class MarkedCountTests(APITestCase):
     def _rows(self):
         resp = self.client.get("/api/admin/orders/")
         self.assertEqual(resp.status_code, 200)
-        return {r["id"]: r["marked_count"] for r in resp.json()}
+        return {r["id"]: r["marked_count"] for r in rows(resp)}
 
     def test_an_unmarked_order_counts_zero(self):
         self.assertEqual(self._rows()[self.order.id], 0)
@@ -175,11 +176,11 @@ class MarkedCountTests(APITestCase):
         self._mark_expense(self.order, "200")
         self._mark_income(self.order)
         self._mark_income(self.other)
-        rows = self._rows()
+        counts = self._rows()
         # 2 expenses + 1 income. Joining two M2Ms without distinct=True would
         # multiply these into 2×1 per side and report 4 here.
-        self.assertEqual(rows[self.order.id], 3)
-        self.assertEqual(rows[self.other.id], 1)
+        self.assertEqual(counts[self.order.id], 3)
+        self.assertEqual(counts[self.other.id], 1)
 
     def test_counting_costs_no_extra_query_per_order(self):
         for i in range(4):
@@ -196,7 +197,7 @@ class MarkedCountTests(APITestCase):
 
     def test_sorting_by_marked_puts_the_marked_orders_first(self):
         self._mark_expense(self.other)
-        ids = [r["id"] for r in self.client.get("/api/admin/orders/?sort=marked").json()]
+        ids = [r["id"] for r in rows(self.client.get("/api/admin/orders/?sort=marked"))]
         self.assertEqual(ids[0], self.other.id)
-        ids = [r["id"] for r in self.client.get("/api/admin/orders/?sort=unmarked").json()]
+        ids = [r["id"] for r in rows(self.client.get("/api/admin/orders/?sort=unmarked"))]
         self.assertEqual(ids[0], self.order.id)

@@ -7,6 +7,7 @@ not on a backend failure, and not by pinning a transient courier outage onto a
 customer.
 """
 
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -170,3 +171,23 @@ class FraudCacheTests(TestCase):
 
     def test_an_invalid_number_short_circuits_before_the_cache(self):
         self.assertIn("error", check_phone("12345"))
+
+
+class SignalScopeTests(TestCase):
+    """The catalogue version is bumped by catalogue writes — and by nothing else.
+
+    A senderless receiver ran on every write in the project (chat messages,
+    analytics sessions, audit rows) to discover it had nothing to do.
+    """
+
+    def test_a_catalogue_write_bumps_the_version(self):
+        before = cache_service.catalogue_version()
+        Product.objects.create(name="বই", slug="sig-book", base_price=Decimal("100"))
+        self.assertNotEqual(cache_service.catalogue_version(), before)
+
+    def test_a_non_catalogue_write_does_not(self):
+        from app.models import VisitorSession
+
+        before = cache_service.catalogue_version()
+        VisitorSession.objects.create(session_id="sig1", visitor_id="v1")
+        self.assertEqual(cache_service.catalogue_version(), before)

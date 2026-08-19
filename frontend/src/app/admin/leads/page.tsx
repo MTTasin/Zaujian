@@ -1,8 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { adminGet, adminPost, adminPatch, adminDelete } from "@/lib/adminApi";
-import { PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, Table, Th, Td, AdminEmpty } from "@/components/admin/ui";
+import {
+  adminGet, adminPost, adminPatch, adminDelete, pageRows, PAGE_SIZE, type Paged,
+} from "@/lib/adminApi";
+import {
+  PageHeader, Card, AdminButton, Field, TextInput, TextArea, Select, Table, Th, Td,
+  AdminEmpty, Pager,
+} from "@/components/admin/ui";
 import { Icon } from "@/components/ui/Icon";
 
 interface Lead {
@@ -34,15 +39,23 @@ const EMPTY = {
 
 export default function AdminLeads() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [form, setForm] = useState({ ...EMPTY });
   const [values, setValues] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   function load() {
-    adminGet<Lead[]>("leads/").then(setLeads).catch((e) => setError(e.message));
+    adminGet<Lead[] | Paged<Lead>>(`leads/?page=${page}`)
+      .then((data) => {
+        const { rows, count } = pageRows(data);
+        setLeads(rows);
+        setTotal(count);
+      })
+      .catch((e) => setError(e.message));
   }
-  useEffect(load, []);
+  useEffect(load, [page]);
 
   const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -180,6 +193,8 @@ export default function AdminLeads() {
           </tbody>
         </Table>
       )}
+
+      <Pager page={page} count={total} pageSize={PAGE_SIZE} onPage={setPage} />
     </div>
   );
 }

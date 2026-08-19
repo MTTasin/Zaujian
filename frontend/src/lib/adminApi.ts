@@ -747,3 +747,21 @@ export const markOrdersSeen = () => adminPost("orders/mark_seen/", {});
 // Web Push: fetch the VAPID public key + register a browser subscription.
 export const getPushKey = () => adminGet<{ public_key: string }>("push-key/");
 export const pushSubscribe = (sub: unknown) => adminPost("push-subscribe/", sub);
+
+// --- paging -------------------------------------------------------------- //
+// The admin lists that grow forever (orders, leads, CAPI events, chats, audit)
+// answer in DRF's paged shape; the bounded catalogue lists still answer with a
+// plain array. Callers should not have to care which.
+export interface Paged<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+export const PAGE_SIZE = 50;   // must match app/pagination.py AdminPagination
+
+export function pageRows<T>(data: T[] | Paged<T>): { rows: T[]; count: number } {
+  if (Array.isArray(data)) return { rows: data, count: data.length };
+  return { rows: data.results, count: data.count };
+}
