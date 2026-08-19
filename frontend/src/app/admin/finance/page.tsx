@@ -802,7 +802,7 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
                 </button>
               </span>
             ) : (
-              <span className="w-[54px]" />
+              <span className="w-13.5" />
             )}
           </li>
         ))}
