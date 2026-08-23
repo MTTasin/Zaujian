@@ -17,7 +17,8 @@ import {
   createSupplier, deleteBuyer, deleteCreditPayment, deleteExpense,
   deleteFinanceCategory, deleteIncome, deleteSupplier, getLedger, listBuyers,
   listExpenses, listFinanceCategories, listIncomes, listSuppliers,
-  getFinanceMeta, getFinanceSummary, longDate, rangeDates, taka, updateBuyer,
+  getFinanceMeta, getFinanceSummary, longDate, clockTime, nowTimeValue,
+  timeInputValue, rangeDates, taka, updateBuyer,
   updateCreditPayment, updateFinanceCategory, updateSupplier,
   type Buyer, type CreditKind, type CreditPayment, type Expense,
   type FinanceCategory, type FinanceMeta, type FinanceSummary, type Income,
@@ -754,7 +755,14 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
             the footer total is the number that matters. */}
         {rows.map((e) => (
           <li key={`${e.kind}${e.id}`} className="flex flex-wrap items-center gap-3 py-2 text-sm">
-            <span className="w-36 shrink-0 text-slate-400">{longDate(e.date)}</span>
+            {/* Time only ever rides along on a payment — a purchase on credit
+                is a day, not a moment. */}
+            <span className="w-36 shrink-0 text-slate-400">
+              {longDate(e.date)}
+              {e.time && (
+                <span className="block text-xs text-slate-400">{clockTime(e.time)}</span>
+              )}
+            </span>
             <span className="min-w-0 flex-1 truncate text-slate-700">
               {e.kind === "credit" ? e.label : `Payment — ${e.label}`}
               {e.kind === "payment" && e.fee_amount > 0 && (
@@ -784,6 +792,7 @@ function ContactLedger({ direction, contactId, tone, meta, onChanged }: {
                       supplier: payable ? contactId : null,
                       buyer: payable ? null : contactId,
                       contact_name: data.contact.name, date: e.date,
+                      time: e.time || null,
                       amount: String(e.amount), fee_amount: String(e.fee_amount),
                       account: (e.account || "cash") as CreditPayment["account"],
                       note: "", created_at: "",
@@ -835,6 +844,10 @@ function CreditPaymentForm({
 }) {
   const payable = direction === "payable";
   const [date, setDate] = useState(payment?.date ?? new Date().toISOString().slice(0, 10));
+  // A new payment is being recorded as it happens, so the clock is the right
+  // answer; an old row that never had one stays blank rather than inventing it.
+  const [time, setTime] = useState(
+    payment ? timeInputValue(payment.time) : nowTimeValue());
   const [amount, setAmount] = useState(payment?.amount ?? String(Math.max(balance, 0)));
   const [fee, setFee] = useState(payment?.fee_amount ?? "");
   const [account, setAccount] = useState<string>(payment?.account ?? "cash");
@@ -853,7 +866,7 @@ function CreditPaymentForm({
       kind: direction,
       supplier: payable ? contactId : null,
       buyer: payable ? null : contactId,
-      date, amount, fee_amount: fee || "0", account, note,
+      date, time: time || null, amount, fee_amount: fee || "0", account, note,
     };
     try {
       if (payment) await updateCreditPayment(payment.id, body);
@@ -867,9 +880,12 @@ function CreditPaymentForm({
   }
 
   return (
-    <form onSubmit={submit} className="mb-4 grid gap-3 rounded-lg bg-slate-50 p-4 md:grid-cols-5">
+    <form onSubmit={submit} className="mb-4 grid gap-3 rounded-lg bg-slate-50 p-4 md:grid-cols-6">
       <Field label="Date">
         <TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      </Field>
+      <Field label="Time" hint="When the money moved.">
+        <TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} />
       </Field>
       <Field
         label={payable ? "Paid to them" : "Received from them"}
@@ -892,7 +908,7 @@ function CreditPaymentForm({
       <Field label="Note">
         <TextInput value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} />
       </Field>
-      <div className="flex flex-wrap items-center gap-3 md:col-span-5">
+      <div className="flex flex-wrap items-center gap-3 md:col-span-6">
         <AdminButton type="submit" disabled={saving}>
           {saving ? "Saving…" : payment ? "Save changes" : "Save"}
         </AdminButton>

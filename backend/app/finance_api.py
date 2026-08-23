@@ -139,11 +139,19 @@ class CreditPaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = CreditPayment
         fields = ["id", "kind", "supplier", "buyer", "contact_name",
-                  "date", "amount", "fee_amount", "account", "note", "created_at"]
+                  "date", "time", "amount", "fee_amount", "account", "note",
+                  "created_at"]
 
     def get_contact_name(self, obj):
         who = obj.supplier or obj.buyer
         return who.name if who else ""
+
+    def to_internal_value(self, data):
+        # <input type="time"> posts "" when the box is cleared. That means "no
+        # time recorded", not a malformed one — without this it 400s.
+        if isinstance(data, dict) and data.get("time") == "":
+            data = {**data, "time": None}
+        return super().to_internal_value(data)
 
     def validate_amount(self, value):
         if value <= 0:
@@ -613,6 +621,19 @@ def credit_allocation(direction, contact_ids):
     return out
 
 
+def payment_clock(p):
+    """The clock time to SHOW for a payment, as "HH:MM" (blank if unknown).
+
+    Payments recorded before `CreditPayment.time` existed have no time of their
+    own; the moment the row was entered is the only record that exists for them,
+    so it stands in. Nothing is written back — a guess never becomes data.
+    """
+    t = p.time
+    if t is None and p.created_at:
+        t = timezone.localtime(p.created_at).time()
+    return t.strftime("%H:%M") if t else ""
+
+
 def contact_ledger(direction, contact_id):
     """Full history for one contact, oldest first, with a running balance.
 
@@ -624,7 +645,7 @@ def contact_ledger(direction, contact_id):
         for e in Expense.objects.filter(is_credit=True, supplier_id=contact_id
                                         ).select_related("category"):
             entries.append({
-                "kind": "credit", "id": e.id, "date": e.date,
+                "kind": "credit", "id": e.id, "date": e.date, "time": "",
                 "label": e.description or e.category.name, "amount": e.amount,
                 "account": "", "fee_amount": ZERO, "note": "",
             })
@@ -634,7 +655,7 @@ def contact_ledger(direction, contact_id):
         for i in Income.objects.filter(is_credit=True, buyer_id=contact_id
                                        ).select_related("category"):
             entries.append({
-                "kind": "credit", "id": i.id, "date": i.date,
+                "kind": "credit", "id": i.id, "date": i.date, "time": "",
                 "label": i.description or i.category.name, "amount": i.amount,
                 "account": "", "fee_amount": ZERO, "note": "",
             })
@@ -644,6 +665,7 @@ def contact_ledger(direction, contact_id):
     for p in payments:
         entries.append({
             "kind": "payment", "id": p.id, "date": p.date,
+            "time": payment_clock(p),
             "label": p.note or "Payment", "amount": p.amount,
             "account": p.account, "fee_amount": p.fee_amount, "note": p.note,
         })
@@ -659,6 +681,7 @@ def contact_ledger(direction, contact_id):
         running += r["amount"] if r["kind"] == "credit" else -r["amount"]
         out.append({
             "kind": r["kind"], "id": r["id"], "date": r["date"].isoformat(),
+            "time": r["time"],
             "label": r["label"], "amount": float(r["amount"]),
             "fee_amount": float(r["fee_amount"]), "account": r["account"],
             "balance": float(running),
@@ -704,6 +727,7 @@ def contact_history(direction, contact_id):
             "kind": "credit" if r.is_credit else "cash",
             "id": r.id,
             "date": r.date,
+            "time": "",
             "label": r.description or r.category.name,
             "amount": r.amount,
             "fee_amount": r.fee_amount,
@@ -717,6 +741,7 @@ def contact_history(direction, contact_id):
         paid += p.amount
         entries.append({
             "kind": "payment", "id": p.id, "date": p.date,
+            "time": payment_clock(p),
             "label": p.note or moved_label, "amount": p.amount,
             "fee_amount": p.fee_amount, "account": p.account,
             "affects_balance": True, "remaining": ZERO,

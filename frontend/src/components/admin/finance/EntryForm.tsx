@@ -10,7 +10,8 @@
 import { useState } from "react";
 import {
   createBuyer, createCreditPayment, createExpense, createIncome, createSupplier,
-  feeFromRate, taka, updateExpense, updateIncome, uploadReceipt, vatInside,
+  feeFromRate, nowTimeValue, taka, updateExpense, updateIncome, uploadReceipt,
+  vatInside,
   type Buyer, type Expense, type FinanceAccountValue, type FinanceCategory,
   type FinanceMeta, type Income, type OrderMark, type Supplier,
 } from "@/lib/financeApi";
@@ -138,7 +139,11 @@ export function EntryForm({
           kind: isExpense ? "payable" : "receivable",
           supplier: isExpense ? Number(supplier) : null,
           buyer: isExpense ? null : Number(buyer),
-          date, amount: String(downNum), fee_amount: fee || "0", account,
+          date,
+          // The clock is only the truth if the deal is being entered on the day
+          // it happened; a backdated one gets no time rather than a made-up one.
+          time: date === new Date().toISOString().slice(0, 10) ? nowTimeValue() : null,
+          amount: String(downNum), fee_amount: fee || "0", account,
           note: "Paid at the time of the deal",
         });
       }

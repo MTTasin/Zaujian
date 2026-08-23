@@ -434,7 +434,8 @@ class IncomeAdmin(admin.ModelAdmin):
 @admin.register(CreditPayment)
 class CreditPaymentAdmin(admin.ModelAdmin):
     """Payments sit against the CONTACT's running balance, not one invoice."""
-    list_display = ("date", "kind", "supplier", "buyer", "amount", "fee_amount", "account")
+    list_display = ("date", "time", "kind", "supplier", "buyer", "amount",
+                    "fee_amount", "account")
     list_filter = ("kind", "account")
     search_fields = ("supplier__name", "buyer__name", "note")
     date_hierarchy = "date"

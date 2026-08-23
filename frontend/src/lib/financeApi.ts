@@ -69,6 +69,9 @@ export interface CreditPayment {
   buyer: number | null;
   contact_name: string;
   date: string;
+  /** Clock time the money moved, "HH:MM:SS". Null on payments recorded before
+   *  times were kept — the ledger falls back to when the row was entered. */
+  time: string | null;
   amount: string;
   fee_amount: string;
   account: FinanceAccountValue;
@@ -163,6 +166,9 @@ export interface LedgerEntry {
   kind: "credit" | "payment";
   id: number;
   date: string;
+  /** "HH:MM" for a payment; always "" for a credit row (a purchase on credit is
+   *  a day, not a moment). Blank too when nothing was ever recorded. */
+  time: string;
   label: string;
   amount: number;
   fee_amount: number;
@@ -192,6 +198,8 @@ export interface ContactEntry {
   kind: "credit" | "cash" | "payment";
   id: number;
   date: string;
+  /** "HH:MM" for a payment, "" for a purchase/sale row. */
+  time: string;
   label: string;
   amount: number;
   fee_amount: number;
@@ -344,6 +352,33 @@ export function longDate(iso: string): string {
   const month = MONTHS[parseInt(m[2], 10) - 1];
   if (!month) return iso;
   return `${m[3]}-${month}-${m[1]}`;
+}
+
+/**
+ * `16:05` → `4:05 PM`. Parsed by hand for the same reason as `longDate`: there
+ * is no date to attach a time to, so `new Date()` would need a fake one and
+ * drag a timezone into a figure that is already local. Accepts `HH:MM` and
+ * `HH:MM:SS`; anything else comes back untouched, and a blank stays blank.
+ */
+export function clockTime(hms: string | null | undefined): string {
+  const m = /^(\d{2}):(\d{2})/.exec(hms || "");
+  if (!m) return hms || "";
+  const h = parseInt(m[1], 10);
+  if (h > 23) return hms as string;
+  const suffix = h < 12 ? "AM" : "PM";
+  return `${h % 12 || 12}:${m[2]} ${suffix}`;
+}
+
+/** `HH:MM` for an `<input type="time">`, from whatever the API sent. */
+export function timeInputValue(hms: string | null | undefined): string {
+  const m = /^(\d{2}):(\d{2})/.exec(hms || "");
+  return m ? `${m[1]}:${m[2]}` : "";
+}
+
+/** The clock right now as `HH:MM`, for pre-filling a new payment. */
+export function nowTimeValue(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /**

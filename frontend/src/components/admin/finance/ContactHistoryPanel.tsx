@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  getContactHistory, taka, longDate,
+  getContactHistory, taka, longDate, clockTime,
   type ContactHistory, type CreditKind,
 } from "@/lib/financeApi";
 
@@ -56,7 +56,13 @@ export function ContactHistoryPanel({ direction, contactId, tone }: {
           {[...data.entries].reverse().map((e) => (
             <li key={`${e.kind}${e.id}`}
                 className="flex flex-wrap items-center gap-3 py-2 text-sm">
-              <span className="w-36 shrink-0 text-slate-400">{longDate(e.date)}</span>
+              <span className="w-36 shrink-0 text-slate-400">
+                {longDate(e.date)}
+                {/* Payments carry a clock time; a purchase row is a day only. */}
+                {e.time && (
+                  <span className="block text-xs text-slate-400">{clockTime(e.time)}</span>
+                )}
+              </span>
               <span className="min-w-0 flex-1 truncate text-slate-700">
                 {e.kind === "payment" ? `${payable ? "Payment" : "Received"} — ${e.label}` : e.label}
               </span>

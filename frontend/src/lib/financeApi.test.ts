@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { feeFromRate, isoDate, longDate, rangeDates, taka, vatInside } from "./financeApi";
+import {
+  clockTime, feeFromRate, isoDate, longDate, nowTimeValue, rangeDates, taka,
+  timeInputValue, vatInside,
+} from "./financeApi";
 
 describe("longDate", () => {
   it("renders dd-Month-yyyy", () => {
@@ -70,5 +73,40 @@ describe("rangeDates", () => {
   });
   it("isoDate uses local parts, not UTC", () => {
     expect(isoDate(new Date(2026, 0, 1))).toBe("2026-01-01");
+  });
+});
+
+describe("clockTime — when a credit payment actually happened", () => {
+  it("renders a 12-hour clock", () => {
+    expect(clockTime("16:05")).toBe("4:05 PM");
+    expect(clockTime("09:30")).toBe("9:30 AM");
+  });
+  it("reads midnight and noon the way a person says them", () => {
+    expect(clockTime("00:15")).toBe("12:15 AM");
+    expect(clockTime("12:00")).toBe("12:00 PM");
+  });
+  it("ignores seconds the API may send", () => {
+    expect(clockTime("16:05:42")).toBe("4:05 PM");
+  });
+  it("shows nothing when no time was ever recorded", () => {
+    // Payments predating the field carry null; an empty cell is honest, an
+    // invented clock is not.
+    expect(clockTime(null)).toBe("");
+    expect(clockTime("")).toBe("");
+  });
+  it("hands back anything it cannot parse untouched", () => {
+    expect(clockTime("teatime")).toBe("teatime");
+  });
+});
+
+describe("timeInputValue / nowTimeValue", () => {
+  it("trims to the HH:MM an <input type=\"time\"> wants", () => {
+    expect(timeInputValue("16:05:42")).toBe("16:05");
+  });
+  it("is blank when there is no time, so the box stays empty", () => {
+    expect(timeInputValue(null)).toBe("");
+  });
+  it("pads the current clock to HH:MM", () => {
+    expect(nowTimeValue()).toMatch(/^\d{2}:\d{2}$/);
   });
 });

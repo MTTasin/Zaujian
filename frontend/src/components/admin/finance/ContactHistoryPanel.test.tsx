@@ -17,13 +17,13 @@ const history: ContactHistory = {
   balance: 1100,
   totals: { bought: 2750, paid: 1650, balance: 1100 },
   entries: [
-    { kind: "credit", id: 1, date: "2026-08-01", label: "Akhi", amount: 900,
+    { kind: "credit", id: 1, date: "2026-08-01", time: "", label: "Akhi", amount: 900,
       fee_amount: 0, account: "", affects_balance: true, remaining: 0, balance: 900 },
-    { kind: "cash", id: 2, date: "2026-08-03", label: "Dupatta cash", amount: 750,
+    { kind: "cash", id: 2, date: "2026-08-03", time: "", label: "Dupatta cash", amount: 750,
       fee_amount: 0, account: "cash", affects_balance: false, remaining: 0, balance: 900 },
-    { kind: "payment", id: 3, date: "2026-08-04", label: "Paid", amount: 900,
+    { kind: "payment", id: 3, date: "2026-08-04", time: "16:05", label: "Paid", amount: 900,
       fee_amount: 0, account: "bank", affects_balance: true, remaining: 0, balance: 0 },
-    { kind: "credit", id: 4, date: "2026-08-05", label: "Nazifa", amount: 1100,
+    { kind: "credit", id: 4, date: "2026-08-05", time: "", label: "Nazifa", amount: 1100,
       fee_amount: 0, account: "", affects_balance: true, remaining: 1100, balance: 1100 },
   ],
 };
@@ -80,5 +80,14 @@ describe("ContactHistoryPanel", () => {
     render(<ContactHistoryPanel direction="payable" contactId={9} tone="amber" />);
 
     await waitFor(() => expect(screen.getByText(/no transactions yet/i)).toBeInTheDocument());
+  });
+
+  it("shows when a payment was made, and no clock on a purchase", async () => {
+    // Two payments to the same supplier on one day are only tellable apart by
+    // the time; a purchase on credit is a day, so it gets none.
+    render(<ContactHistoryPanel direction="payable" contactId={1} tone="amber" />);
+
+    expect(await screen.findByText("4:05 PM")).toBeInTheDocument();
+    expect(screen.queryByText(/AM|PM/)).toBe(screen.getByText("4:05 PM"));
   });
 });

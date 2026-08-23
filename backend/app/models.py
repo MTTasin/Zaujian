@@ -1186,6 +1186,14 @@ class DailyFunnelStat(models.Model):
 # See docs/superpowers/specs/2026-07-27-finance-cashbook-design.md.
 
 
+def local_clock_time():
+    """Callable default for `CreditPayment.time` — the clock, seconds trimmed.
+
+    Named at module level (not a lambda) because a migration has to import it.
+    """
+    return timezone.localtime().time().replace(microsecond=0)
+
+
 class FinanceAccount(models.TextChoices):
     """Where the money moved. Not a ledger — just a label for reconciling.
 
@@ -1399,6 +1407,16 @@ class CreditPayment(models.Model):
         related_name="credit_payments",
     )
     date = models.DateField(default=timezone.localdate, db_index=True)
+    # A payment is round money handed over at a moment — the owner phones the
+    # supplier, sends bKash, and wants the receipt to say when. The DAY alone is
+    # not enough when two payments to the same contact land the same day.
+    # Nullable because rows written before this field existed have no honest
+    # value; the API falls back to `created_at` for those and never invents one.
+    time = models.TimeField(
+        null=True, blank=True, default=local_clock_time,
+        help_text="Clock time the money moved. Blank on payments recorded "
+                  "before times were kept.",
+    )
     amount = models.DecimalField(
         max_digits=12, decimal_places=2,
         help_text="What changed hands between the two parties — this is what "
